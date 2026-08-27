@@ -1,0 +1,12 @@
+services:
+  hub:
+    build: .
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - joveworks-data:/var/lib/joveworks
+    restart: unless-stopped
+
+volumes:
+  joveworks-data:
