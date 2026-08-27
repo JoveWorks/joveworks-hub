@@ -197,6 +197,7 @@ struct CreatedWorkspace {
 struct CreatedShare {
     id: String,
     href: String,
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -828,6 +829,10 @@ async fn create_workspace_share(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<CreatedShare>), ApiError> {
     let token = workspace_token(&headers)?;
+    let public_url = state
+        .public_url
+        .as_deref()
+        .ok_or_else(|| ApiError::BadRequest("student sharing needs JOVEWORKS_PUBLIC_URL".into()))?;
     let hash =
         sqlx::query_scalar::<_, String>("SELECT edit_token_hash FROM workspaces WHERE id = ?")
             .bind(&id)
@@ -836,6 +841,22 @@ async fn create_workspace_share(
             .ok_or(ApiError::NotFound)?;
     if hash != sha256(token) {
         return Err(ApiError::Unauthorized);
+    }
+    if let Some(existing) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM workspace_shares WHERE workspace_id = ? ORDER BY created_at LIMIT 1",
+    )
+    .bind(&id)
+    .fetch_optional(&state.database)
+    .await?
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(CreatedShare {
+                href: format!("/s/{existing}"),
+                url: format!("{}/s/{existing}", public_url.trim_end_matches('/')),
+                id: existing,
+            }),
+        ));
     }
     for _ in 0..3 {
         let share_id = next_workspace_id();
@@ -846,11 +867,14 @@ async fn create_workspace_share(
             .await;
         match result {
             Ok(_) => {
+                let href = format!("/s/{share_id}");
+                let url = format!("{}/s/{share_id}", public_url.trim_end_matches('/'));
                 return Ok((
                     StatusCode::CREATED,
                     Json(CreatedShare {
-                        href: format!("/s/{share_id}"),
+                        href,
                         id: share_id,
+                        url,
                     }),
                 ));
             }
