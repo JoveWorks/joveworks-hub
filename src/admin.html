@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JoveWorks Hub — Admin</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #f4f5f8; color: #171b26; }
+    * { box-sizing: border-box; } body { margin: 0; } main { max-width: 1040px; margin: auto; padding: 40px 20px 72px; }
+    header { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 28px; } h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); letter-spacing: -.04em; } h2 { margin: 0 0 16px; font-size: 18px; } p { line-height: 1.5; } .muted { color: #606a7c; } .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    section { background: #fff; border: 1px solid #dce0e8; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px #16203b0a; } .wide { grid-column: 1 / -1; }
+    label { display: grid; gap: 6px; margin: 12px 0; font-size: 14px; font-weight: 650; } input, select, button { font: inherit; } input, select { width: 100%; padding: 9px 10px; border: 1px solid #bdc5d3; border-radius: 7px; background: #fff; color: inherit; }
+    button { padding: 9px 13px; border: 0; border-radius: 7px; background: #2d5bd1; color: #fff; cursor: pointer; font-weight: 700; } button.secondary { background: #e8ecf5; color: #27324b; } button:disabled { opacity: .5; cursor: not-allowed; }
+    .row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; } .row > input { flex: 1 1 180px; } .status { min-height: 24px; margin: 14px 0; padding: 10px 12px; border-radius: 7px; background: #eaf6ee; color: #165b31; } .status.error { background: #ffeded; color: #922424; }
+    .list { display: grid; gap: 7px; margin: 14px 0 0; } .item { display: flex; gap: 10px; align-items: baseline; padding: 9px 10px; border: 1px solid #e1e5ed; border-radius: 7px; } .item small { color: #606a7c; } .catalogue-choice { cursor: pointer; font-weight: 500; }
+    code { font-size: .9em; } #publication-link { overflow-wrap: anywhere; } @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } header { display: block; } }
+    @media (prefers-color-scheme: dark) { :root { background: #12151c; color: #edf0f7; } section { background: #1b202a; border-color: #303847; } input, select { background: #151923; border-color: #3d485b; } .muted, .item small { color: #aab4c7; } .item { border-color: #303847; } button.secondary { background: #303847; color: #edf0f7; } }
+  </style>
+</head>
+<body>
+<main>
+  <header><div><p class="muted">JoveWorks Hub</p><h1>Course publishing</h1></div><p class="muted">The admin token stays only in this tab.</p></header>
+  <p id="status" class="status">Enter the administrator token, then load or create a course.</p>
+  <div class="grid">
+    <section>
+      <h2>1. Administrator access</h2>
+      <label>Admin token<input id="token" type="password" autocomplete="current-password" placeholder="Paste the Hub administrator token"></label>
+      <button id="load-courses" type="button">Load courses</button>
+    </section>
+    <section>
+      <h2>2. Create or select a course</h2>
+      <label>Existing course<select id="courses"><option value="">Load courses first</option></select></label>
+      <label>New course slug<input id="new-slug" placeholder="machine-design-2026"></label>
+      <label>New course title<input id="new-title" placeholder="Machine design 2026"></label>
+      <button id="save-course" type="button">Create or update course</button>
+    </section>
+    <section>
+      <h2>3. Upload a catalogue revision</h2>
+      <p class="muted">The catalogue’s own <code>id</code> and <code>restricted</code> setting are read from the selected JSON file.</p>
+      <label>Catalogue JSON<input id="catalogue-file" type="file" accept="application/json,.json"></label>
+      <label>Immutable version<input id="catalogue-version" type="number" min="1" step="1" value="1"></label>
+      <button id="upload-catalogue" type="button">Upload catalogue</button>
+    </section>
+    <section>
+      <h2>4. Publish a NodeBook</h2>
+      <label>NodeBook JSON<input id="nodebook-file" type="file" accept="application/json,.json"></label>
+      <label>Publication mode<select id="mode"><option value="viewer">Read-only viewer</option><option value="editor">Editor</option></select></label>
+      <p class="muted">Select every catalogue revision the NodeBook uses.</p>
+      <div id="catalogues" class="list"><p class="muted">Select a course to see its catalogue revisions.</p></div>
+      <button id="publish" type="button">Publish NodeBook</button>
+      <p id="publication-link"></p>
+    </section>
+    <section class="wide">
+      <h2>Course material</h2>
+      <div id="publications" class="list"><p class="muted">Select a course to see publications.</p></div>
+    </section>
+  </div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let course = undefined;
+  let uploaded = [];
+  const status = (message, error = false) => { const node = $('status'); node.textContent = message; node.className = `status${error ? ' error' : ''}`; };
+  const token = () => $('token').value.trim();
+  const headers = () => ({ 'Content-Type': 'application/json', 'X-JoveWorks-Admin-Token': token() });
+  const request = async (path, options = {}) => {
+    const response = await fetch(path, options);
+    if (response.status === 204) return undefined;
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+    return body;
+  };
+  const refs = () => [...new Map([...(course?.catalogues || []), ...uploaded].map((ref) => [`${ref.id}\n${ref.version}`, ref])).values()];
+  const selectedRefs = () => refs().filter((ref) => $(`ref:${ref.id}:${ref.version}`)?.checked);
+  const renderCatalogues = () => {
+    const list = $('catalogues'); list.replaceChildren();
+    const all = refs();
+    if (all.length === 0) { list.innerHTML = '<p class="muted">Upload a catalogue or select a course with published material.</p>'; return; }
+    for (const ref of all) {
+      const label = document.createElement('label'); label.className = 'item catalogue-choice';
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = true;
+      const text = document.createElement('span'); text.textContent = `${ref.id} · version ${ref.version}`;
+      const hash = document.createElement('small'); hash.textContent = ref.hash.slice(0, 12);
+      label.append(checkbox, text, hash); list.append(label);
+    }
+  };
+  const renderCourse = () => {
+    $('publications').replaceChildren(); const list = $('publications');
+    if (!course) { list.innerHTML = '<p class="muted">Select a course to see publications.</p>'; renderCatalogues(); return; }
+    if (course.publications.length === 0) list.innerHTML = '<p class="muted">No NodeBooks have been published to this course yet.</p>';
+    for (const publication of course.publications) { const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title; const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`; row.append(meta); list.append(row); }
+    renderCatalogues();
+  };
+  const loadCourse = async (slug) => { course = await request(`/api/v1/courses/${encodeURIComponent(slug)}`); uploaded = []; renderCourse(); };
+  $('load-courses').onclick = async () => {
+    try { const index = await request('/api/v1/courses'); const select = $('courses'); select.replaceChildren();
+      if (index.courses.length === 0) select.add(new Option('No courses yet', ''));
+      for (const item of index.courses) select.add(new Option(item.title, item.slug));
+      if (index.courses[0]) { select.value = index.courses[0].slug; await loadCourse(select.value); }
+      status('Courses loaded.');
+    } catch (error) { status(error.message, true); }
+  };
+  $('courses').onchange = async () => { if (!$('courses').value) return; try { await loadCourse($('courses').value); status(`Loaded ${course.title}.`); } catch (error) { status(error.message, true); } };
+  $('save-course').onclick = async () => {
+    const slug = $('new-slug').value.trim(), title = $('new-title').value.trim();
+    if (!token()) return status('Enter the administrator token first.', true);
+    if (!slug || !title) return status('Enter both a course slug and title.', true);
+    try { await request(`/api/v1/courses/${encodeURIComponent(slug)}`, { method: 'POST', headers: headers(), body: JSON.stringify({ title }) });
+      await $('load-courses').onclick(); $('courses').value = slug; await loadCourse(slug); status(`Saved ${title}.`);
+    } catch (error) { status(error.message, true); }
+  };
+  $('upload-catalogue').onclick = async () => {
+    const file = $('catalogue-file').files[0], version = Number($('catalogue-version').value);
+    if (!token()) return status('Enter the administrator token first.', true);
+    if (!file || !Number.isInteger(version) || version < 1) return status('Choose a catalogue file and positive version.', true);
+    try { const content = JSON.parse(await file.text()); if (!content || typeof content.id !== 'string') throw new Error('The catalogue file must contain a string id.');
+      const reference = await request(`/api/v1/catalogues/${encodeURIComponent(content.id)}/${version}`, { method: 'POST', headers: headers(), body: JSON.stringify({ content }) });
+      uploaded = [...uploaded.filter((ref) => ref.id !== reference.id || ref.version !== reference.version), reference]; renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Publish a NodeBook to add it to this course.`);
+    } catch (error) { status(error.message, true); }
+  };
+  $('publish').onclick = async () => {
+    const file = $('nodebook-file').files[0], selected = selectedRefs();
+    if (!token()) return status('Enter the administrator token first.', true);
+    if (!course) return status('Select or create a course first.', true);
+    if (!file) return status('Choose a NodeBook JSON file.', true);
+    if (selected.length === 0) return status('Select at least one catalogue revision.', true);
+    try { const document = JSON.parse(await file.text()); if (!document || typeof document.title !== 'string') throw new Error('The NodeBook file must contain a title.');
+      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title: document.title, mode: $('mode').value, document, catalogues: selected, courses: [course.slug] }) });
+      const link = new URL(`/p/${created.id}`, window.location.origin).href; $('publication-link').replaceChildren(); const anchor = document.createElement('a'); anchor.href = link; anchor.textContent = link; $('publication-link').append('Published: ', anchor);
+      await loadCourse(course.slug); status(`Published ${document.title}.`);
+    } catch (error) { status(error.message, true); }
+  };
+</script>
+</body>
+</html>

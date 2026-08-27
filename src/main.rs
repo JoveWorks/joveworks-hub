@@ -16,7 +16,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
-    response::{IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
 use rand::{Rng, distr::Alphanumeric};
@@ -279,6 +279,7 @@ fn app(state: AppState) -> Router {
     let rate_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/admin", get(admin))
         .route("/.well-known/joveworks", get(discovery))
         .route("/api/v1/courses", get(list_courses))
         .route(
@@ -397,6 +398,12 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
 
 async fn healthz() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+/// A small same-origin publishing console. Its token field is deliberately
+/// browser-memory-only; the server continues to enforce it on every write.
+async fn admin() -> Html<&'static str> {
+    Html(include_str!("admin.html"))
 }
 
 async fn discovery() -> Json<Discovery> {
@@ -1236,6 +1243,31 @@ mod tests {
             .unwrap();
             assert_eq!(exists, 1, "table {table} should exist");
         }
+    }
+
+    #[tokio::test]
+    async fn admin_console_is_served_from_the_hub_origin() {
+        let response = test_app()
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("Course publishing")
+        );
     }
 
     #[tokio::test]
