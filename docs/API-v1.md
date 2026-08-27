@@ -28,7 +28,7 @@ X-JoveWorks-Admin-Token: <JOVEWORKS_ADMIN_TOKEN>
 The protected writes are `POST /api/v1/courses/{slug}`,
 `PUT /api/v1/courses/{slug}/catalogues`, `POST /api/v1/catalogues/{id}/{version}`,
 the admin-console catalogue upload, and `POST /api/v1/publications`.
-`GET /api/v1/admin/catalogues` also requires this header. A missing, malformed, or incorrect header is
+`GET`/`DELETE /api/v1/admin/catalogues` also require this header. A missing, malformed, or incorrect header is
 `401 Unauthorized`; the token is never returned in a response.
 
 Retrieving a catalogue whose stored content has `restricted: true` additionally
@@ -149,7 +149,9 @@ catalogues. Restricted course bundles require the course token.
 
 Requires the admin header. Replaces the course's pinned catalogue set with the
 provided immutable references. Every reference must already exist and match its
-stored hash. An empty set is allowed.
+stored hash. An empty set is allowed only when no published NodeBook in the
+course still pins a revision; this preserves the ability to open all published
+course material.
 
 ## Catalogues
 
@@ -184,6 +186,12 @@ entry returns `404`.
 
 Requires the admin header and returns every stored immutable revision, ordered
 by id and version. It powers the course catalogue checklist in `/admin`.
+
+### `DELETE /api/v1/admin/catalogues/{id}/{version}`
+
+Requires the admin header. Deletes an unused immutable revision. Hub rejects
+the request with `409 Conflict` when any course, publication, or workspace
+still references it.
 
 ## Publications
 

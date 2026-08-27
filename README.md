@@ -89,7 +89,9 @@ NodeBooks are read locally by the browser, then sent only to the same Hub.
 
 Use the catalogue-library checklist to attach immutable revisions to a course.
 The course’s complete pinned set is then used when publishing NodeBooks and is
-included in the course response.
+included in the course response. A revision needed by an already-published
+NodeBook cannot be removed from that course; publish a replacement NodeBook
+before retiring material.
 
 ## API v1
 
@@ -114,6 +116,7 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
 | `GET`/`PUT /api/v1/courses/{slug}/catalogues` | Get full course catalogue bundle / replace its pinned revision set. |
 | `GET /api/v1/admin/catalogues` | List catalogue revisions for the admin console. |
+| `DELETE /api/v1/admin/catalogues/{id}/{version}` | Delete an unused catalogue revision. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |
 | `GET /api/v1/catalogues/{id}/{version}` | Retrieve that exact version. |
 | `POST /api/v1/publications` | Publish an immutable NodeBook snapshot. |

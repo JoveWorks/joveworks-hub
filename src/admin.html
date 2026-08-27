@@ -10,7 +10,7 @@
     header { display: flex; justify-content: space-between; gap: 20px; align-items: end; margin-bottom: 28px; } h1 { margin: 0; font-size: clamp(28px, 5vw, 46px); letter-spacing: -.04em; } h2 { margin: 0 0 16px; font-size: 18px; } p { line-height: 1.5; } .muted { color: #606a7c; } .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
     section { background: #fff; border: 1px solid #dce0e8; border-radius: 12px; padding: 20px; box-shadow: 0 2px 10px #16203b0a; } .wide { grid-column: 1 / -1; }
     label { display: grid; gap: 6px; margin: 12px 0; font-size: 14px; font-weight: 650; } input, select, button { font: inherit; } input, select { width: 100%; padding: 9px 10px; border: 1px solid #bdc5d3; border-radius: 7px; background: #fff; color: inherit; }
-    button { padding: 9px 13px; border: 0; border-radius: 7px; background: #2d5bd1; color: #fff; cursor: pointer; font-weight: 700; } button.secondary { background: #e8ecf5; color: #27324b; } button:disabled { opacity: .5; cursor: not-allowed; }
+    button { padding: 9px 13px; border: 0; border-radius: 7px; background: #2d5bd1; color: #fff; cursor: pointer; font-weight: 700; } button.secondary { background: #e8ecf5; color: #27324b; } button.danger { margin-left: auto; background: #a32d3d; } button:disabled { opacity: .5; cursor: not-allowed; }
     .row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; } .row > input { flex: 1 1 180px; } .status { min-height: 24px; margin: 14px 0; padding: 10px 12px; border-radius: 7px; background: #eaf6ee; color: #165b31; } .status.error { background: #ffeded; color: #922424; }
     .list { display: grid; gap: 7px; margin: 14px 0 0; } .item { display: flex; gap: 10px; align-items: baseline; padding: 9px 10px; border: 1px solid #e1e5ed; border-radius: 7px; } .item small { color: #606a7c; } .catalogue-choice { cursor: pointer; font-weight: 500; }
     code { font-size: .9em; } #publication-link { overflow-wrap: anywhere; } @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } header { display: block; } }
@@ -43,7 +43,7 @@
     </section>
     <section>
       <h2>4. Course catalogues</h2>
-      <p class="muted">A course owns its catalogue revisions. Every course download includes their full contents.</p>
+      <p class="muted">Tick a revision to include it in this course; untick and save to remove it. Every course download includes the full selected set.</p>
       <div id="catalogues" class="list"><p class="muted">Select a course to manage its catalogue set.</p></div>
       <button id="save-catalogues" type="button">Save course catalogues</button>
     </section>
@@ -81,11 +81,18 @@
     if (catalogueLibrary.length === 0) { list.innerHTML = '<p class="muted">No catalogue revisions yet. Upload one first.</p>'; return; }
     const attached = new Set(course.catalogues.map((ref) => `${ref.id}\n${ref.version}`));
     for (const ref of catalogueLibrary) {
-      const label = document.createElement('label'); label.className = 'item catalogue-choice';
-      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = attached.has(`${ref.id}\n${ref.version}`);
+      const row = document.createElement('div'); row.className = 'item';
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = attached.has(`${ref.id}\n${ref.version}`); checkbox.setAttribute('aria-label', `Include ${ref.id} version ${ref.version} in this course`);
       const text = document.createElement('span'); text.textContent = `${ref.id} · version ${ref.version}`;
       const hash = document.createElement('small'); hash.textContent = `${ref.restricted ? 'restricted · ' : ''}${ref.hash.slice(0, 12)}`;
-      label.append(checkbox, text, hash); list.append(label);
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Delete'; remove.disabled = attached.has(`${ref.id}\n${ref.version}`); remove.title = remove.disabled ? 'Remove this revision from the course before deleting it.' : 'Delete this unused catalogue revision from Hub.';
+      remove.onclick = async () => {
+        if (!confirm(`Delete ${ref.id} version ${ref.version}? This only works when no course, publication, or workspace uses it.`)) return;
+        try { await request(`/api/v1/admin/catalogues/${encodeURIComponent(ref.id)}/${ref.version}`, { method: 'DELETE', headers: headers() });
+          await loadCatalogueLibrary(); renderCatalogues(); status(`Deleted ${ref.id} version ${ref.version}.`);
+        } catch (error) { status(error.message, true); }
+      };
+      row.append(checkbox, text, hash, remove); list.append(row);
     }
   };
   const renderCourse = () => {

@@ -5,6 +5,7 @@
 //! in catalogue resources, never in a graph document.
 
 use std::{
+    collections::HashSet,
     env,
     net::SocketAddr,
     sync::Arc,
@@ -17,7 +18,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use rand::{Rng, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,8 @@ enum ApiError {
     BadRequest(String),
     #[error("an item with these immutable coordinates already exists")]
     Conflict,
+    #[error("this catalogue revision is in use and cannot be deleted")]
+    InUse,
     #[error("the requested resource was not found")]
     NotFound,
     #[error("this resource requires course access")]
@@ -76,6 +79,7 @@ impl IntoResponse for ApiError {
         let status = match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict => StatusCode::CONFLICT,
+            Self::InUse => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -324,6 +328,10 @@ fn app(state: AppState) -> Router {
         .route(
             "/api/v1/admin/catalogues/{version}",
             post(put_admin_catalogue),
+        )
+        .route(
+            "/api/v1/admin/catalogues/{id}/{version}",
+            delete(delete_admin_catalogue),
         )
         .route("/api/v1/admin/catalogues", get(list_admin_catalogues))
         .route("/api/v1/publications", post(create_publication))
@@ -581,6 +589,40 @@ async fn put_course_catalogues(
     if !exists {
         return Err(ApiError::NotFound);
     }
+    let requested = input
+        .catalogues
+        .iter()
+        .map(|catalogue| {
+            (
+                catalogue.id.as_str(),
+                catalogue.version,
+                catalogue.hash.as_str(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    let publication_pins = sqlx::query_as::<_, (String, String)>(
+        "SELECT p.id, p.catalogues_json
+         FROM publications p JOIN course_publications cp ON cp.publication_id = p.id
+         WHERE cp.course_slug = ?",
+    )
+    .bind(&slug)
+    .fetch_all(&mut *transaction)
+    .await?;
+    for (publication_id, pins) in publication_pins {
+        let pins: Vec<CatalogueRef> = serde_json::from_str(&pins).map_err(|_| {
+            ApiError::Database(sqlx::Error::Protocol(
+                "stored publication catalogue refs are invalid".into(),
+            ))
+        })?;
+        for pin in pins {
+            if !requested.contains(&(pin.id.as_str(), pin.version, pin.hash.as_str())) {
+                return Err(ApiError::BadRequest(format!(
+                    "cannot remove catalogue {} version {}: publication {publication_id} still pins it",
+                    pin.id, pin.version
+                )));
+            }
+        }
+    }
     sqlx::query("DELETE FROM course_catalogues WHERE course_slug = ?")
         .bind(&slug)
         .execute(&mut *transaction)
@@ -712,11 +754,75 @@ async fn list_admin_catalogues(
     }))
 }
 
+/// Deletes an upload only while nothing can still resolve it. Published
+/// material remains immutable; this is solely for cleaning up unused drafts.
+async fn delete_admin_catalogue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, version)): Path<(String, i64)>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&headers, &state)?;
+    valid_name(&id, "catalogue id")?;
+    if version < 1 {
+        return Err(ApiError::BadRequest(
+            "catalogue version must be positive".into(),
+        ));
+    }
+    let course_use = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM course_catalogues WHERE catalogue_id = ? AND catalogue_version = ?)",
+    )
+    .bind(&id)
+    .bind(version)
+    .fetch_one(&state.database)
+    .await?;
+    let publication_use = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(
+           SELECT 1 FROM publications p JOIN json_each(p.catalogues_json) pin
+           WHERE json_extract(pin.value, '$.id') = ?
+             AND json_extract(pin.value, '$.version') = ?
+         )",
+    )
+    .bind(&id)
+    .bind(version)
+    .fetch_one(&state.database)
+    .await?;
+    let workspace_use = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(
+           SELECT 1 FROM workspaces w JOIN json_each(w.catalogues_json) pin
+           WHERE json_extract(pin.value, '$.id') = ?
+             AND json_extract(pin.value, '$.version') = ?
+         )",
+    )
+    .bind(&id)
+    .bind(version)
+    .fetch_one(&state.database)
+    .await?;
+    if course_use != 0 || publication_use != 0 || workspace_use != 0 {
+        return Err(ApiError::InUse);
+    }
+    let result = sqlx::query("DELETE FROM catalogues WHERE id = ? AND version = ?")
+        .bind(id)
+        .bind(version)
+        .execute(&state.database)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn validate_catalogue_refs(
     database: &SqlitePool,
     catalogues: &[CatalogueRef],
 ) -> Result<(), ApiError> {
+    let mut seen = HashSet::new();
     for catalogue in catalogues {
+        if !seen.insert((&catalogue.id, catalogue.version)) {
+            return Err(ApiError::BadRequest(format!(
+                "catalogue {} version {} is listed more than once",
+                catalogue.id, catalogue.version
+            )));
+        }
         let actual = sqlx::query_scalar::<_, String>(
             "SELECT hash FROM catalogues WHERE id = ? AND version = ?",
         )
@@ -1568,6 +1674,7 @@ mod tests {
         }
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/courses")
@@ -1666,6 +1773,35 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let publication_id = json_body(response).await["id"].as_str().unwrap().to_owned();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::from(json!({ "catalogues": [] }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/admin/catalogues/public-example/1")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
 
         let response = app
             .clone()
@@ -1778,6 +1914,7 @@ mod tests {
         assert_eq!(reference["version"], 1);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/catalogues/yaml-example/1")
@@ -1790,6 +1927,19 @@ mod tests {
         let catalogue = json_body(response).await;
         assert_eq!(catalogue["id"], "yaml-example");
         assert_eq!(catalogue["restricted"], false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/admin/catalogues/yaml-example/1")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
