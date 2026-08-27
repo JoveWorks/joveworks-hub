@@ -193,6 +193,11 @@ struct CreatedWorkspace {
     id: String,
     edit_token: String,
 }
+#[derive(Serialize)]
+struct CreatedShare {
+    id: String,
+    href: String,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,11 +261,17 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/publications/{id}", get(get_publication))
         .route("/api/v1/workspaces", post(create_workspace))
         .route(
+            "/api/v1/workspaces/{id}/shares",
+            post(create_workspace_share),
+        )
+        .route(
             "/api/v1/workspaces/{id}",
             get(get_workspace)
                 .put(replace_workspace)
                 .delete(delete_workspace),
         )
+        .route("/api/v1/shares/{id}", get(get_shared_workspace))
+        .route("/s/{id}", get(share_link))
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
@@ -343,6 +354,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         3,
         "workspace_course_pins",
         include_str!("../migrations/0003_workspace_course_pins.sql"),
+    ),
+    (
+        4,
+        "student_shares",
+        include_str!("../migrations/0004_student_shares.sql"),
     ),
 ];
 
@@ -804,6 +820,87 @@ async fn delete_workspace(
     } else {
         ApiError::NotFound
     })
+}
+
+async fn create_workspace_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<CreatedShare>), ApiError> {
+    let token = workspace_token(&headers)?;
+    let hash =
+        sqlx::query_scalar::<_, String>("SELECT edit_token_hash FROM workspaces WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.database)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    if hash != sha256(token) {
+        return Err(ApiError::Unauthorized);
+    }
+    for _ in 0..3 {
+        let share_id = next_workspace_id();
+        let result = sqlx::query("INSERT INTO workspace_shares (id, workspace_id) VALUES (?, ?)")
+            .bind(&share_id)
+            .bind(&id)
+            .execute(&state.database)
+            .await;
+        match result {
+            Ok(_) => {
+                return Ok((
+                    StatusCode::CREATED,
+                    Json(CreatedShare {
+                        href: format!("/s/{share_id}"),
+                        id: share_id,
+                    }),
+                ));
+            }
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
+            Err(error) => return Err(ApiError::Database(error)),
+        }
+    }
+    Err(ApiError::Database(sqlx::Error::Protocol(
+        "could not allocate a share id".into(),
+    )))
+}
+
+async fn get_shared_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkspaceDocument>, ApiError> {
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
+        "SELECT w.id, w.title, w.document_json, w.course_slug, w.catalogues_json, w.updated_at FROM workspaces w JOIN workspace_shares s ON s.workspace_id = w.id WHERE s.id = ?",
+    ).bind(&id).fetch_optional(&state.database).await?.ok_or(ApiError::NotFound)?;
+    Ok(Json(WorkspaceDocument {
+        id: row.0,
+        title: row.1,
+        document: parse_json(&row.2)?,
+        course_slug: row.3,
+        catalogues: serde_json::from_str(&row.4).map_err(|_| {
+            ApiError::Database(sqlx::Error::Protocol(
+                "stored workspace catalogue refs are invalid".into(),
+            ))
+        })?,
+        updated_at: row.5,
+    }))
+}
+
+async fn share_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Redirect, ApiError> {
+    let (Some(public_url), Some(editor_url)) =
+        (state.public_url.as_deref(), state.editor_url.as_deref())
+    else {
+        return Err(ApiError::BadRequest(
+            "student share links need JOVEWORKS_PUBLIC_URL and JOVEWORKS_EDITOR_URL".into(),
+        ));
+    };
+    Ok(Redirect::temporary(&format!(
+        "{}?hub={}&share={}",
+        editor_url.trim_end_matches('/'),
+        url_component(public_url.trim_end_matches('/')),
+        url_component(&id)
+    )))
 }
 
 /// The human-facing, intentionally short publication URL. It will become the
