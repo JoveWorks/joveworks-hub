@@ -40,10 +40,7 @@ token (and the course token when serving restricted catalogues), then run:
 It starts the release build at `0.0.0.0:8080`. Set `JOVEWORKS_BIND` in `.env`
 to choose another address or port. Windows can normally reach the service at
 `http://localhost:8080`; use WSL mirrored networking plus the relevant Windows
-firewall rule to accept LAN traffic. For student use, put an HTTPS reverse
-proxy in front of Hub: the JoveWorks editor accepts plain HTTP only for
-`localhost`.
-
+firewall rule to accept LAN traffic. For student use, put an HTTPS reverse proxy in front of Hub: the JoveWorks editor accepts plain HTTP only for `localhost`.
 ## Run with Docker Compose
 
 Copy `.env.example` to `.env`, replace both secrets with generated random
