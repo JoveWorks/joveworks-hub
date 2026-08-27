@@ -80,7 +80,8 @@ see [the homelab deployment guide](docs/HOMELAB-DEPLOYMENT.md).
 ## Admin console
 
 Open `https://your-hub.example/admin` to create courses, upload immutable
-catalogue revisions, and publish NodeBooks without using the shell. Enter the
+catalogue revisions from JSON or YAML files, and publish NodeBooks without using
+the shell. Enter the
 administrator token for the current browser session; Hub never stores it and
 the console does not persist it in browser storage. Catalogue files and
 NodeBooks are read locally by the browser, then sent only to the same Hub.

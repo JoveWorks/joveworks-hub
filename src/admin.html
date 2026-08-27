@@ -36,8 +36,8 @@
     </section>
     <section>
       <h2>3. Upload a catalogue revision</h2>
-      <p class="muted">The catalogue’s own <code>id</code> and <code>restricted</code> setting are read from the selected JSON file.</p>
-      <label>Catalogue JSON<input id="catalogue-file" type="file" accept="application/json,.json"></label>
+      <p class="muted">The catalogue’s own <code>id</code> and <code>restricted</code> setting are read from the selected JSON or YAML file.</p>
+      <label>Catalogue JSON or YAML<input id="catalogue-file" type="file" accept="application/json,.json,.yaml,.yml,application/yaml,text/yaml"></label>
       <label>Immutable version<input id="catalogue-version" type="number" min="1" step="1" value="1"></label>
       <button id="upload-catalogue" type="button">Upload catalogue</button>
     </section>
@@ -113,8 +113,7 @@
     const file = $('catalogue-file').files[0], version = Number($('catalogue-version').value);
     if (!token()) return status('Enter the administrator token first.', true);
     if (!file || !Number.isInteger(version) || version < 1) return status('Choose a catalogue file and positive version.', true);
-    try { const content = JSON.parse(await file.text()); if (!content || typeof content.id !== 'string') throw new Error('The catalogue file must contain a string id.');
-      const reference = await request(`/api/v1/catalogues/${encodeURIComponent(content.id)}/${version}`, { method: 'POST', headers: headers(), body: JSON.stringify({ content }) });
+    try { const reference = await request(`/api/v1/admin/catalogues/${version}`, { method: 'POST', headers: headers(), body: await file.text() });
       uploaded = [...uploaded.filter((ref) => ref.id !== reference.id || ref.version !== reference.version), reference]; renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Publish a NodeBook to add it to this course.`);
     } catch (error) { status(error.message, true); }
   };

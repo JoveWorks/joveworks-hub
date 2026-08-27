@@ -291,6 +291,10 @@ fn app(state: AppState) -> Router {
             "/api/v1/catalogues/{id}/{version}",
             get(get_catalogue).post(put_catalogue),
         )
+        .route(
+            "/api/v1/admin/catalogues/{version}",
+            post(put_admin_catalogue),
+        )
         .route("/api/v1/publications", post(create_publication))
         .route("/api/v1/publications/{id}", get(get_publication))
         .route("/api/v1/workspaces", post(create_workspace))
@@ -563,14 +567,44 @@ async fn put_catalogue(
     Json(input): Json<CatalogueInput>,
 ) -> Result<Json<CatalogueRef>, ApiError> {
     require_admin(&headers, &state)?;
+    store_catalogue(&state, id, version, input.content).await
+}
+
+/// Admin-console-only convenience endpoint. JSON and YAML catalogue files have
+/// their id inside the document, so this avoids asking a browser to parse YAML
+/// merely to construct the immutable resource URL.
+async fn put_admin_catalogue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(version): Path<i64>,
+    body: String,
+) -> Result<Json<CatalogueRef>, ApiError> {
+    require_admin(&headers, &state)?;
+    let content = serde_yaml::from_str::<Value>(&body).map_err(|error| {
+        ApiError::BadRequest(format!("catalogue YAML or JSON is invalid: {error}"))
+    })?;
+    let id = content
+        .as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::BadRequest("catalogue content.id is required".into()))?
+        .to_owned();
+    store_catalogue(&state, id, version, content).await
+}
+
+async fn store_catalogue(
+    state: &AppState,
+    id: String,
+    version: i64,
+    content: Value,
+) -> Result<Json<CatalogueRef>, ApiError> {
     valid_name(&id, "catalogue id")?;
     if version < 1 {
         return Err(ApiError::BadRequest(
             "catalogue version must be positive".into(),
         ));
     }
-    let object = input
-        .content
+    let object = content
         .as_object()
         .ok_or_else(|| ApiError::BadRequest("catalogue content must be a JSON object".into()))?;
     if object.get("id").and_then(Value::as_str) != Some(&id) {
@@ -593,7 +627,7 @@ async fn put_catalogue(
         .ok_or_else(|| {
             ApiError::BadRequest("catalogue content.restricted must be true or false".into())
         })?;
-    let content = json_text(input.content)?;
+    let content = json_text(content)?;
     let hash = sha256(&content);
     let result = sqlx::query(
         "INSERT INTO catalogues (id, version, hash, restricted, content_json) VALUES (?, ?, ?, ?, ?)",
@@ -1540,6 +1574,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn admin_console_accepts_yaml_catalogues() {
+        let app = test_app().await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/admin/catalogues/1")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::from(
+                        "schemaVersion: 1\nid: yaml-example\nname: YAML example\nrestricted: false\nformulas: []\n",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let reference = json_body(response).await;
+        assert_eq!(reference["id"], "yaml-example");
+        assert_eq!(reference["version"], 1);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/catalogues/yaml-example/1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalogue = json_body(response).await;
+        assert_eq!(catalogue["id"], "yaml-example");
+        assert_eq!(catalogue["restricted"], false);
     }
 
     #[tokio::test]
