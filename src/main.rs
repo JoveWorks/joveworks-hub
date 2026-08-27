@@ -192,7 +192,6 @@ struct WorkspaceInput {
 struct CreatedWorkspace {
     id: String,
     edit_token: String,
-    href: String,
 }
 
 #[derive(Serialize)]
@@ -262,7 +261,6 @@ fn app(state: AppState) -> Router {
                 .put(replace_workspace)
                 .delete(delete_workspace),
         )
-        .route("/w/{id}", get(workspace_link))
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
@@ -636,11 +634,7 @@ async fn create_workspace(
             Ok(_) => {
                 return Ok((
                     StatusCode::CREATED,
-                    Json(CreatedWorkspace {
-                        href: format!("/w/{id}"),
-                        id,
-                        edit_token,
-                    }),
+                    Json(CreatedWorkspace { id, edit_token }),
                 ));
             }
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
@@ -652,50 +646,33 @@ async fn create_workspace(
     )))
 }
 
-/// Redirect a compact Hub URL to the editor. The two configured origins make
-/// this work behind a TLS reverse proxy where the internal bind address and
-/// browser-visible URL are necessarily different.
-async fn workspace_link(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Redirect, ApiError> {
-    let (Some(public_url), Some(editor_url)) =
-        (state.public_url.as_deref(), state.editor_url.as_deref())
-    else {
-        return Err(ApiError::BadRequest(
-            "workspace links need JOVEWORKS_PUBLIC_URL and JOVEWORKS_EDITOR_URL".into(),
-        ));
-    };
-    Ok(Redirect::temporary(&format!(
-        "{}?hub={}&workspace={}",
-        editor_url.trim_end_matches('/'),
-        url_component(public_url.trim_end_matches('/')),
-        url_component(&id),
-    )))
-}
-
 async fn get_workspace(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-        "SELECT title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
+    let token = workspace_token(&headers)?;
+    let row = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
+        "SELECT edit_token_hash, title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.database)
     .await?
     .ok_or(ApiError::NotFound)?;
+    if row.0 != sha256(token) {
+        return Err(ApiError::Unauthorized);
+    }
     Ok(Json(WorkspaceDocument {
         id,
-        title: row.0,
-        document: parse_json(&row.1)?,
-        course_slug: row.2,
-        catalogues: serde_json::from_str(&row.3).map_err(|_| {
+        title: row.1,
+        document: parse_json(&row.2)?,
+        course_slug: row.3,
+        catalogues: serde_json::from_str(&row.4).map_err(|_| {
             ApiError::Database(sqlx::Error::Protocol(
                 "stored workspace catalogue refs are invalid".into(),
             ))
         })?,
-        updated_at: row.4,
+        updated_at: row.5,
     }))
 }
 
@@ -833,8 +810,21 @@ async fn delete_workspace(
 /// NodeBook-viewer route once the editor consumes Hub's API. Until then, it
 /// still resolves to the immutable publication JSON rather than an encoded
 /// document URL.
-async fn publication_link(Path(id): Path<String>) -> Redirect {
-    Redirect::temporary(&format!("/api/v1/publications/{id}"))
+async fn publication_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Redirect, ApiError> {
+    let (Some(public_url), Some(editor_url)) =
+        (state.public_url.as_deref(), state.editor_url.as_deref())
+    else {
+        return Ok(Redirect::temporary(&format!("/api/v1/publications/{id}")));
+    };
+    Ok(Redirect::temporary(&format!(
+        "{}?hub={}&publication={}",
+        editor_url.trim_end_matches('/'),
+        url_component(public_url.trim_end_matches('/')),
+        url_component(&id),
+    )))
 }
 
 fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
@@ -925,14 +915,14 @@ fn next_workspace_token() -> String {
         .collect()
 }
 fn url_component(value: &str) -> String {
-    value.bytes().fold(String::new(), |mut encoded, byte| {
+    value.bytes().fold(String::new(), |mut output, byte| {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(byte as char);
+            output.push(byte as char);
         } else {
             use std::fmt::Write;
-            write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+            write!(output, "%{byte:02X}").expect("String writes cannot fail");
         }
-        encoded
+        output
     })
 }
 fn mode_name(mode: PublicationMode) -> &'static str {
@@ -1191,7 +1181,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
             response.headers()[header::LOCATION],
-            format!("/api/v1/publications/{publication_id}")
+            format!(
+                "https://editor.example.edu?hub=https%3A%2F%2Fhub.example.edu&publication={publication_id}"
+            )
         );
 
         let response = app
@@ -1215,7 +1207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_workspace_loads_publicly_but_requires_its_edit_token_to_save() {
+    async fn a_workspace_requires_its_edit_token_to_load_or_save() {
         let app = test_app().await;
         let document = json!({ "schemaVersion": 1, "id": "student-belt-study" });
         let response = app
@@ -1244,6 +1236,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/workspaces/{id}"))
+                    .header(WORKSPACE_TOKEN_HEADER, token)
                     .body(Body::empty())
                     .unwrap(),
             )

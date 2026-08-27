@@ -187,9 +187,8 @@ human-facing publication link and is not yet a browser viewer route.
 
 ## Student workspaces
 
-Workspaces are mutable student graphs. Their 12-character opaque `id` is safe
-to share for **read-only loading**; it is not an edit credential. Creating a
-workspace returns a separate edit token once. The editor stores that token in
+Workspaces are mutable, private student graphs. Creating a workspace returns
+an edit token once. The editor stores that token in
 the creating browser's local storage so ordinary reloads can continue saving;
 it never places it in a link or sends it while loading.
 
@@ -216,15 +215,9 @@ Keep `editToken` private. Hub stores only its SHA-256 digest.
 
 ### `GET /api/v1/workspaces/{id}`
 
-No token is required. It returns the saved `id`, `title`, `document`, and
-`updatedAt`. Anyone who knows the Hub address and workspace ID can load a
-copy, but cannot overwrite the original.
-
-### `GET /w/{id}`
-
-When `JOVEWORKS_PUBLIC_URL` and `JOVEWORKS_EDITOR_URL` are configured, this
-compact public link redirects to the editor and opens the workspace. It is the
-shareable link; it contains no edit capability.
+Requires the workspace-token header. It returns the saved `id`, `title`,
+`document`, and `updatedAt` only to the browser that owns that workspace.
+Course material is shared through immutable publications, not workspaces.
 
 ### `PUT /api/v1/workspaces/{id}`
 
