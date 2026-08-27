@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    edit_token_hash TEXT NOT NULL,
+    title TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -185,6 +185,48 @@ Returns `307 Temporary Redirect` with `Location: /api/v1/publications/{id}`.
 It currently redirects to the JSON resource; it is reserved as the stable
 human-facing publication link and is not yet a browser viewer route.
 
+## Student workspaces
+
+Workspaces are mutable student graphs. Their 12-character opaque `id` is safe
+to share for **read-only loading**; it is not an edit credential. Creating a
+workspace returns a separate edit token once. The editor stores that token in
+the creating browser's local storage so ordinary reloads can continue saving;
+it never places it in a link or sends it while loading.
+
+### `POST /api/v1/workspaces`
+
+No administrator token is required. The request is:
+
+```json
+{"title":"Belt study","document":{"schemaVersion":1,"id":"belt-study"}}
+```
+
+`title` is required (1–200 characters); `document` must be a JSON object with
+`schemaVersion` and `id`. Success is `201 Created`:
+
+```json
+{"id":"Ab12Cd34Ef56","editToken":"<32-character secret>"}
+```
+
+Keep `editToken` private. Hub stores only its SHA-256 digest.
+
+### `GET /api/v1/workspaces/{id}`
+
+No token is required. It returns the saved `id`, `title`, `document`, and
+`updatedAt`. Anyone who knows the Hub address and workspace ID can load a
+copy, but cannot overwrite the original.
+
+### `PUT /api/v1/workspaces/{id}`
+
+Uses the same `title`/`document` request shape as create and requires:
+
+```text
+X-JoveWorks-Workspace-Token: <editToken>
+```
+
+It replaces the workspace and returns its new snapshot with `200 OK`. An
+unknown workspace is `404`; a missing or incorrect edit token is `401`.
+
 ## Immutability, ETags, and caching
 
 Catalogue revisions and publications are immutable. Clients should therefore

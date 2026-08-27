@@ -9,7 +9,7 @@ use std::{env, net::SocketAddr, sync::Arc};
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -29,6 +29,7 @@ use tracing::{info, warn};
 const PROTOCOL_VERSION: u8 = 1;
 const ADMIN_TOKEN_HEADER: &str = "x-joveworks-admin-token";
 const COURSE_TOKEN_HEADER: &str = "x-joveworks-course-token";
+const WORKSPACE_TOKEN_HEADER: &str = "x-joveworks-workspace-token";
 
 #[derive(Clone)]
 struct AppState {
@@ -159,6 +160,28 @@ struct CreatedPublication {
     href: String,
 }
 
+#[derive(Deserialize)]
+struct WorkspaceInput {
+    title: String,
+    document: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatedWorkspace {
+    id: String,
+    edit_token: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceDocument {
+    id: String,
+    title: String,
+    document: Value,
+    updated_at: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -201,11 +224,21 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/v1/publications", post(create_publication))
         .route("/api/v1/publications/{id}", get(get_publication))
+        .route("/api/v1/workspaces", post(create_workspace))
+        .route(
+            "/api/v1/workspaces/{id}",
+            get(get_workspace).put(replace_workspace),
+        )
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
         // Same-origin hosting is the normal deployment. This permissive layer
         // lets the standalone editor connect too; put Hub behind HTTPS.
-        .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_headers(Any)
+                .allow_methods([Method::GET, Method::POST, Method::PUT]),
+        )
         .with_state(state)
 }
 
@@ -243,11 +276,18 @@ async fn migrate(database: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-const MIGRATIONS: &[(i64, &str, &str)] = &[(
-    1,
-    "initial_schema",
-    include_str!("../migrations/0001_initial_schema.sql"),
-)];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "initial_schema",
+        include_str!("../migrations/0001_initial_schema.sql"),
+    ),
+    (
+        2,
+        "student_workspaces",
+        include_str!("../migrations/0002_student_workspaces.sql"),
+    ),
+];
 
 async fn healthz() -> StatusCode {
     StatusCode::NO_CONTENT
@@ -505,6 +545,111 @@ async fn get_publication(
     }))
 }
 
+/// Create a mutable student-owned graph. The public workspace id is safe to
+/// share for loading; only the separately returned edit token can replace it.
+async fn create_workspace(
+    State(state): State<AppState>,
+    Json(input): Json<WorkspaceInput>,
+) -> Result<(StatusCode, Json<CreatedWorkspace>), ApiError> {
+    valid_name(&input.title, "workspace title")?;
+    validate_document(&input.document)?;
+    let document = json_text(input.document)?;
+
+    // A collision is extremely unlikely, but the primary key remains the
+    // authority and lets us safely retry rather than relying on probability.
+    for _ in 0..3 {
+        let id = next_workspace_id();
+        let edit_token = next_workspace_token();
+        let token_hash = sha256(&edit_token);
+        let result = sqlx::query(
+            "INSERT INTO workspaces (id, edit_token_hash, title, document_json) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(&token_hash)
+        .bind(&input.title)
+        .bind(&document)
+        .execute(&state.database)
+        .await;
+        match result {
+            Ok(_) => {
+                return Ok((
+                    StatusCode::CREATED,
+                    Json(CreatedWorkspace { id, edit_token }),
+                ));
+            }
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
+            Err(error) => return Err(ApiError::Database(error)),
+        }
+    }
+    Err(ApiError::Database(sqlx::Error::Protocol(
+        "could not allocate a workspace id".into(),
+    )))
+}
+
+async fn get_workspace(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<WorkspaceDocument>, ApiError> {
+    let row = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT title, document_json, updated_at FROM workspaces WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&state.database)
+    .await?
+    .ok_or(ApiError::NotFound)?;
+    Ok(Json(WorkspaceDocument {
+        id,
+        title: row.0,
+        document: parse_json(&row.1)?,
+        updated_at: row.2,
+    }))
+}
+
+async fn replace_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(input): Json<WorkspaceInput>,
+) -> Result<Json<WorkspaceDocument>, ApiError> {
+    valid_name(&input.title, "workspace title")?;
+    validate_document(&input.document)?;
+    let token = workspace_token(&headers)?;
+    let document = json_text(input.document)?;
+    let result = sqlx::query(
+        "UPDATE workspaces
+         SET title = ?, document_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND edit_token_hash = ?",
+    )
+    .bind(&input.title)
+    .bind(&document)
+    .bind(&id)
+    .bind(sha256(token))
+    .execute(&state.database)
+    .await?;
+    if result.rows_affected() == 0 {
+        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM workspaces WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.database)
+            .await?
+            .is_some();
+        return Err(if exists {
+            ApiError::Unauthorized
+        } else {
+            ApiError::NotFound
+        });
+    }
+    let updated_at = sqlx::query_scalar("SELECT updated_at FROM workspaces WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&state.database)
+        .await?;
+    Ok(Json(WorkspaceDocument {
+        id,
+        title: input.title,
+        document: parse_json(&document)?,
+        updated_at,
+    }))
+}
+
 /// The human-facing, intentionally short publication URL. It will become the
 /// NodeBook-viewer route once the editor consumes Hub's API. Until then, it
 /// still resolves to the immutable publication JSON rather than an encoded
@@ -532,6 +677,14 @@ fn require_course_access(headers: &HeaderMap, state: &AppState) -> Result<(), Ap
         Some(expected) if given == Some(expected) => Ok(()),
         _ => Err(ApiError::Unauthorized),
     }
+}
+
+fn workspace_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(WORKSPACE_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or(ApiError::Unauthorized)
 }
 
 fn valid_name(value: &str, field: &str) -> Result<(), ApiError> {
@@ -575,6 +728,20 @@ fn next_publication_id() -> String {
     rand::rng()
         .sample_iter(Alphanumeric)
         .take(12)
+        .map(char::from)
+        .collect()
+}
+fn next_workspace_id() -> String {
+    rand::rng()
+        .sample_iter(Alphanumeric)
+        .take(12)
+        .map(char::from)
+        .collect()
+}
+fn next_workspace_token() -> String {
+    rand::rng()
+        .sample_iter(Alphanumeric)
+        .take(32)
         .map(char::from)
         .collect()
 }
@@ -849,6 +1016,82 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_loads_publicly_but_requires_its_edit_token_to_save() {
+        let app = test_app().await;
+        let document = json!({ "schemaVersion": 1, "id": "student-belt-study" });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "title": "Belt study", "document": document }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created = json_body(response).await;
+        let id = created["id"].as_str().unwrap();
+        let token = created["editToken"].as_str().unwrap();
+        assert_eq!(id.len(), 12);
+        assert_eq!(token.len(), 32);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["title"], "Belt study");
+
+        let replacement = json!({ "schemaVersion": 1, "id": "student-belt-study-v2" });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "title": "Belt study v2", "document": replacement }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(WORKSPACE_TOKEN_HEADER, token)
+                    .body(Body::from(
+                        json!({ "title": "Belt study v2", "document": replacement }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = json_body(response).await;
+        assert_eq!(saved["title"], "Belt study v2");
+        assert_eq!(saved["document"]["id"], "student-belt-study-v2");
+        assert!(saved.get("editToken").is_none());
     }
 
     #[tokio::test]
