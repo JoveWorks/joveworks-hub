@@ -4,12 +4,18 @@
 //! A publication URL contains only a random identifier; formula bodies remain
 //! in catalogue resources, never in a graph document.
 
-use std::{env, net::SocketAddr, sync::Arc};
+use std::{
+    env,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -20,6 +26,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
@@ -30,6 +37,8 @@ const PROTOCOL_VERSION: u8 = 1;
 const ADMIN_TOKEN_HEADER: &str = "x-joveworks-admin-token";
 const COURSE_TOKEN_HEADER: &str = "x-joveworks-course-token";
 const WORKSPACE_TOKEN_HEADER: &str = "x-joveworks-workspace-token";
+const MAX_REQUEST_BYTES: usize = 1_048_576;
+const REQUESTS_PER_MINUTE: u32 = 600;
 
 #[derive(Clone)]
 struct AppState {
@@ -40,6 +49,12 @@ struct AppState {
     course_token: Option<Arc<str>>,
     public_url: Option<Arc<str>>,
     editor_url: Option<Arc<str>>,
+    rate_window: Arc<Mutex<RateWindow>>,
+}
+
+struct RateWindow {
+    started_at: Instant,
+    requests: u32,
 }
 
 #[derive(Debug, Error)]
@@ -217,6 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         course_token: env::var("JOVEWORKS_COURSE_TOKEN").ok().map(Arc::from),
         public_url: env::var("JOVEWORKS_PUBLIC_URL").ok().map(Arc::from),
         editor_url: env::var("JOVEWORKS_EDITOR_URL").ok().map(Arc::from),
+        rate_window: Arc::new(Mutex::new(RateWindow {
+            started_at: Instant::now(),
+            requests: 0,
+        })),
     };
     let listener = TcpListener::bind(address).await?;
     info!(%address, "JoveWorks Hub listening");
@@ -225,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn app(state: AppState) -> Router {
+    let rate_state = state.clone();
     Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/joveworks", get(discovery))
@@ -245,6 +265,8 @@ fn app(state: AppState) -> Router {
         .route("/w/{id}", get(workspace_link))
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
+        .layer(middleware::from_fn_with_state(rate_state, rate_limit))
         // Same-origin hosting is the normal deployment. This permissive layer
         // lets the standalone editor connect too; put Hub behind HTTPS.
         .layer(
@@ -254,6 +276,24 @@ fn app(state: AppState) -> Router {
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE]),
         )
         .with_state(state)
+}
+
+async fn rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let mut window = state.rate_window.lock().await;
+    if window.started_at.elapsed() >= Duration::from_secs(60) {
+        window.started_at = Instant::now();
+        window.requests = 0;
+    }
+    if window.requests >= REQUESTS_PER_MINUTE {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "Hub is busy; try again shortly" })),
+        )
+            .into_response();
+    }
+    window.requests += 1;
+    drop(window);
+    next.run(request).await
 }
 
 async fn migrate(database: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -931,6 +971,10 @@ mod tests {
             course_token: Some(Arc::from("course-test-token")),
             public_url: Some(Arc::from("https://hub.example.edu")),
             editor_url: Some(Arc::from("https://editor.example.edu")),
+            rate_window: Arc::new(Mutex::new(RateWindow {
+                started_at: Instant::now(),
+                requests: 0,
+            })),
         })
     }
 

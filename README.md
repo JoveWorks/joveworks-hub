@@ -55,6 +55,22 @@ before upgrading the container. Put the public deployment behind HTTPS; an
 opaque publication ID is an identifier, never permission to retrieve a
 restricted catalogue.
 
+### Production HTTPS and backups
+
+Set the public URL, editor URL, and `JOVEWORKS_DOMAIN` in `.env`, point the
+domain's DNS at the host, then run:
+
+```sh
+docker compose -f compose.production.yaml up --build -d
+```
+
+The production composition places Caddy in front of Hub for automatic HTTPS;
+Hub itself is not published to the Internet. Hub rejects bodies larger than
+1 MiB and applies a basic 600-request/minute service-wide guard. Back up the
+SQLite database before upgrades. For a local database, run
+`./scripts/backup-db.sh`; Docker-volume backups should use the same SQLite
+`.backup` operation from a maintenance container.
+
 ## API v1
 
 All write requests use this header:

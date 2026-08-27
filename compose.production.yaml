@@ -1,0 +1,21 @@
+services:
+  hub:
+    build: .
+    env_file: .env
+    expose: ["8080"]
+    volumes: ["joveworks-data:/var/lib/joveworks"]
+    restart: unless-stopped
+  caddy:
+    image: caddy:2.10-alpine
+    environment: ["JOVEWORKS_DOMAIN=${JOVEWORKS_DOMAIN}"]
+    depends_on: [hub]
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+volumes:
+  joveworks-data:
+  caddy-data:
+  caddy-config:
