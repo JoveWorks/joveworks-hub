@@ -211,51 +211,43 @@ fn app(state: AppState) -> Router {
 
 async fn migrate(database: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS catalogues (
-            id TEXT NOT NULL,
-            version INTEGER NOT NULL,
-            hash TEXT NOT NULL,
-            restricted INTEGER NOT NULL,
-            content_json TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id, version)
+        "CREATE TABLE IF NOT EXISTS joveworks_schema_migrations (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )",
     )
     .execute(database)
     .await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS courses (
-            slug TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            theme_json TEXT,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )",
-    )
-    .execute(database)
-    .await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS publications (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            mode TEXT NOT NULL,
-            document_json TEXT NOT NULL,
-            catalogues_json TEXT NOT NULL,
-            published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )",
-    )
-    .execute(database)
-    .await?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS course_publications (
-            course_slug TEXT NOT NULL REFERENCES courses(slug),
-            publication_id TEXT NOT NULL REFERENCES publications(id),
-            PRIMARY KEY (course_slug, publication_id)
-        )",
-    )
-    .execute(database)
-    .await?;
+
+    let mut transaction = database.begin().await?;
+    for &(version, name, sql) in MIGRATIONS {
+        let applied = sqlx::query_scalar::<_, i64>(
+            "SELECT EXISTS(SELECT 1 FROM joveworks_schema_migrations WHERE version = ?)",
+        )
+        .bind(version)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if applied != 0 {
+            continue;
+        }
+
+        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO joveworks_schema_migrations (version, name) VALUES (?, ?)")
+            .bind(version)
+            .bind(name)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
+
+const MIGRATIONS: &[(i64, &str, &str)] = &[(
+    1,
+    "initial_schema",
+    include_str!("../migrations/0001_initial_schema.sql"),
+)];
 
 async fn healthz() -> StatusCode {
     StatusCode::NO_CONTENT
@@ -621,6 +613,127 @@ mod tests {
             admin_token: Arc::from("admin-test-token"),
             course_token: Some(Arc::from("course-test-token")),
         })
+    }
+
+    #[tokio::test]
+    async fn migrations_apply_once_to_fresh_database() {
+        let database = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        migrate(&database).await.unwrap();
+        migrate(&database).await.unwrap();
+
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM joveworks_schema_migrations WHERE version = 1",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(applied, 1);
+        for table in [
+            "catalogues",
+            "courses",
+            "publications",
+            "course_publications",
+        ] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
+            )
+            .bind(table)
+            .fetch_one(&database)
+            .await
+            .unwrap();
+            assert_eq!(exists, 1, "table {table} should exist");
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_adopts_database_created_by_inline_setup() {
+        let database = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            r#"CREATE TABLE catalogues (
+                id TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                hash TEXT NOT NULL,
+                restricted INTEGER NOT NULL,
+                content_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (id, version)
+            );
+            INSERT INTO catalogues (id, version, hash, restricted, content_json)
+            VALUES ('existing', 1, 'hash', 0, '{}');
+            CREATE TABLE courses (
+                slug TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                theme_json TEXT,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO courses (slug, title, theme_json)
+            VALUES ('legacy-course', 'Legacy course', '{"theme":"blue"}');
+            CREATE TABLE publications (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                document_json TEXT NOT NULL,
+                catalogues_json TEXT NOT NULL,
+                published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO publications (id, title, mode, document_json, catalogues_json)
+            VALUES ('legacy-publication', 'Legacy publication', 'viewer', '{}',
+                    '[{"id":"existing","version":1,"hash":"hash"}]');
+            CREATE TABLE course_publications (
+                course_slug TEXT NOT NULL REFERENCES courses(slug),
+                publication_id TEXT NOT NULL REFERENCES publications(id),
+                PRIMARY KEY (course_slug, publication_id)
+            );
+            INSERT INTO course_publications (course_slug, publication_id)
+            VALUES ('legacy-course', 'legacy-publication');"#,
+        )
+        .execute(&database)
+        .await
+        .unwrap();
+
+        migrate(&database).await.unwrap();
+
+        let existing: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM catalogues WHERE id = 'existing' AND version = 1",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(existing, 1);
+
+        let preserved_course: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM courses WHERE slug = 'legacy-course' AND title = 'Legacy course'",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(preserved_course, 1);
+
+        let preserved_publication: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM publications WHERE id = 'legacy-publication' AND title = 'Legacy publication'",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(preserved_publication, 1);
+
+        let preserved_link: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM course_publications
+             WHERE course_slug = 'legacy-course' AND publication_id = 'legacy-publication'",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(preserved_link, 1);
     }
 
     fn json_request(uri: &str, body: Value) -> Request<Body> {
