@@ -58,7 +58,7 @@ restricted catalogue.
 ### Production HTTPS and backups
 
 Set the public URL and editor URL in `.env`, configure your HTTPS reverse proxy
-to send traffic to `127.0.0.1:8080`, then run:
+to send traffic to the loopback host port in `.env` (8083 on this server), then run:
 
 ```sh
 docker compose -f compose.production.yaml up --build -d

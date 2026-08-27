@@ -1,9 +1,12 @@
 services:
   hub:
     build: .
+    container_name: joveworks-hub
     env_file: .env
-    ports: ["${JOVEWORKS_HOST_BIND:-127.0.0.1}:8080:8080"]
+    ports: ["${JOVEWORKS_HOST_BIND:-127.0.0.1}:${JOVEWORKS_HOST_PORT:-8083}:8080"]
     volumes: ["joveworks-data:/var/lib/joveworks"]
+    init: true
     restart: unless-stopped
+    stop_grace_period: 30s
 volumes:
   joveworks-data:
