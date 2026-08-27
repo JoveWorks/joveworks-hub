@@ -38,6 +38,8 @@ struct AppState {
     /// Restricted catalogues can never accidentally become public. Setting this
     /// is required before one may be downloaded.
     course_token: Option<Arc<str>>,
+    public_url: Option<Arc<str>>,
+    editor_url: Option<Arc<str>>,
 }
 
 #[derive(Debug, Error)]
@@ -175,6 +177,7 @@ struct WorkspaceInput {
 struct CreatedWorkspace {
     id: String,
     edit_token: String,
+    href: String,
 }
 
 #[derive(Serialize)]
@@ -212,6 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         database,
         admin_token: Arc::from(admin_token),
         course_token: env::var("JOVEWORKS_COURSE_TOKEN").ok().map(Arc::from),
+        public_url: env::var("JOVEWORKS_PUBLIC_URL").ok().map(Arc::from),
+        editor_url: env::var("JOVEWORKS_EDITOR_URL").ok().map(Arc::from),
     };
     let listener = TcpListener::bind(address).await?;
     info!(%address, "JoveWorks Hub listening");
@@ -237,6 +242,7 @@ fn app(state: AppState) -> Router {
                 .put(replace_workspace)
                 .delete(delete_workspace),
         )
+        .route("/w/{id}", get(workspace_link))
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
         // Same-origin hosting is the normal deployment. This permissive layer
@@ -590,7 +596,11 @@ async fn create_workspace(
             Ok(_) => {
                 return Ok((
                     StatusCode::CREATED,
-                    Json(CreatedWorkspace { id, edit_token }),
+                    Json(CreatedWorkspace {
+                        href: format!("/w/{id}"),
+                        id,
+                        edit_token,
+                    }),
                 ));
             }
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => continue,
@@ -599,6 +609,28 @@ async fn create_workspace(
     }
     Err(ApiError::Database(sqlx::Error::Protocol(
         "could not allocate a workspace id".into(),
+    )))
+}
+
+/// Redirect a compact Hub URL to the editor. The two configured origins make
+/// this work behind a TLS reverse proxy where the internal bind address and
+/// browser-visible URL are necessarily different.
+async fn workspace_link(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Redirect, ApiError> {
+    let (Some(public_url), Some(editor_url)) =
+        (state.public_url.as_deref(), state.editor_url.as_deref())
+    else {
+        return Err(ApiError::BadRequest(
+            "workspace links need JOVEWORKS_PUBLIC_URL and JOVEWORKS_EDITOR_URL".into(),
+        ));
+    };
+    Ok(Redirect::temporary(&format!(
+        "{}?hub={}&workspace={}",
+        editor_url.trim_end_matches('/'),
+        url_component(public_url.trim_end_matches('/')),
+        url_component(&id),
     )))
 }
 
@@ -852,6 +884,17 @@ fn next_workspace_token() -> String {
         .map(char::from)
         .collect()
 }
+fn url_component(value: &str) -> String {
+    value.bytes().fold(String::new(), |mut encoded, byte| {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            write!(encoded, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+        encoded
+    })
+}
 fn mode_name(mode: PublicationMode) -> &'static str {
     match mode {
         PublicationMode::Viewer => "viewer",
@@ -886,6 +929,8 @@ mod tests {
             database,
             admin_token: Arc::from("admin-test-token"),
             course_token: Some(Arc::from("course-test-token")),
+            public_url: Some(Arc::from("https://hub.example.edu")),
+            editor_url: Some(Arc::from("https://editor.example.edu")),
         })
     }
 

@@ -124,6 +124,14 @@ Publishing never overwrites a catalogue revision. Use a new positive version
 when the catalogue changes; every publication retains the exact hash it was
 published with. The script prints the short `/p/<id>` link on success.
 
+## Short workspace links
+
+Set `JOVEWORKS_PUBLIC_URL` to Hub's public HTTPS origin and
+`JOVEWORKS_EDITOR_URL` to the editor's public HTTPS origin. Hub then turns
+`https://hub.example.edu/w/<workspace-id>` into an editor link that opens the
+workspace automatically. These IDs grant read access only; the edit capability
+remains in the creating browser.
+
 ## Deliberate limits
 
 - No accounts, submissions, or live collaboration yet.

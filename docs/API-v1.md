@@ -220,6 +220,12 @@ No token is required. It returns the saved `id`, `title`, `document`, and
 `updatedAt`. Anyone who knows the Hub address and workspace ID can load a
 copy, but cannot overwrite the original.
 
+### `GET /w/{id}`
+
+When `JOVEWORKS_PUBLIC_URL` and `JOVEWORKS_EDITOR_URL` are configured, this
+compact public link redirects to the editor and opens the workspace. It is the
+shareable link; it contains no edit capability.
+
 ### `PUT /api/v1/workspaces/{id}`
 
 Uses the same `title`/`document` request shape as create and requires:
