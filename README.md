@@ -110,9 +110,23 @@ wired to Hub, that short route redirects to the immutable JSON resource; the
 link and API contract will not change when it starts serving the NodeBook
 viewer.
 
+## Publish course material
+
+Create the course once, then publish a catalogue revision and a NodeBook in
+one command:
+
+```sh
+./scripts/create-course.sh machine-design-2026 "Machine design 2026"
+./scripts/publish-nodebook.sh machine-design-2026 ./course-catalogue.json 1 ./belt-study.jove.json
+```
+
+Publishing never overwrites a catalogue revision. Use a new positive version
+when the catalogue changes; every publication retains the exact hash it was
+published with. The script prints the short `/p/<id>` link on success.
+
 ## Deliberate limits
 
-- No accounts, submissions, personal storage, or live collaboration yet.
+- No accounts, submissions, or live collaboration yet.
 - No server-side formula evaluation.
 - No claim of DRM. A student who can evaluate a restricted catalogue receives
   it in their browser. The course token is an MVP access gate, to be replaced
