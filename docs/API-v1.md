@@ -201,6 +201,10 @@ No administrator token is required. The request is:
 {"title":"Belt study","document":{"schemaVersion":1,"id":"belt-study"}}
 ```
 
+When a student starts from course material, the editor also sends its course
+slug and immutable catalogue pins. Hub verifies both before storing them, then
+returns them on every load so another browser can fetch the exact revisions.
+
 `title` is required (1–200 characters); `document` must be a JSON object with
 `schemaVersion` and `id`. Success is `201 Created`:
 

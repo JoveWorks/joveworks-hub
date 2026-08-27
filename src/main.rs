@@ -164,6 +164,10 @@ struct CreatedPublication {
 struct WorkspaceInput {
     title: String,
     document: Value,
+    #[serde(default)]
+    course_slug: Option<String>,
+    #[serde(default)]
+    catalogues: Vec<CatalogueRef>,
 }
 
 #[derive(Serialize)]
@@ -179,6 +183,8 @@ struct WorkspaceDocument {
     id: String,
     title: String,
     document: Value,
+    course_slug: Option<String>,
+    catalogues: Vec<CatalogueRef>,
     updated_at: String,
 }
 
@@ -288,6 +294,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         2,
         "student_workspaces",
         include_str!("../migrations/0002_student_workspaces.sql"),
+    ),
+    (
+        3,
+        "workspace_course_pins",
+        include_str!("../migrations/0003_workspace_course_pins.sql"),
     ),
 ];
 
@@ -555,6 +566,7 @@ async fn create_workspace(
 ) -> Result<(StatusCode, Json<CreatedWorkspace>), ApiError> {
     valid_name(&input.title, "workspace title")?;
     validate_document(&input.document)?;
+    let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
 
     // A collision is extremely unlikely, but the primary key remains the
@@ -564,12 +576,14 @@ async fn create_workspace(
         let edit_token = next_workspace_token();
         let token_hash = sha256(&edit_token);
         let result = sqlx::query(
-            "INSERT INTO workspaces (id, edit_token_hash, title, document_json) VALUES (?, ?, ?, ?)",
+            "INSERT INTO workspaces (id, edit_token_hash, title, document_json, course_slug, catalogues_json) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&token_hash)
         .bind(&input.title)
         .bind(&document)
+        .bind(&course_slug)
+        .bind(&catalogues)
         .execute(&state.database)
         .await;
         match result {
@@ -592,8 +606,8 @@ async fn get_workspace(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT title, document_json, updated_at FROM workspaces WHERE id = ?",
+    let row = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+        "SELECT title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.database)
@@ -603,7 +617,13 @@ async fn get_workspace(
         id,
         title: row.0,
         document: parse_json(&row.1)?,
-        updated_at: row.2,
+        course_slug: row.2,
+        catalogues: serde_json::from_str(&row.3).map_err(|_| {
+            ApiError::Database(sqlx::Error::Protocol(
+                "stored workspace catalogue refs are invalid".into(),
+            ))
+        })?,
+        updated_at: row.4,
     }))
 }
 
@@ -616,14 +636,17 @@ async fn replace_workspace(
     valid_name(&input.title, "workspace title")?;
     validate_document(&input.document)?;
     let token = workspace_token(&headers)?;
+    let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
     let result = sqlx::query(
         "UPDATE workspaces
-         SET title = ?, document_json = ?, updated_at = CURRENT_TIMESTAMP
+         SET title = ?, document_json = ?, course_slug = ?, catalogues_json = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ? AND edit_token_hash = ?",
     )
     .bind(&input.title)
     .bind(&document)
+    .bind(&course_slug)
+    .bind(&catalogues)
     .bind(&id)
     .bind(sha256(token))
     .execute(&state.database)
@@ -648,8 +671,64 @@ async fn replace_workspace(
         id,
         title: input.title,
         document: parse_json(&document)?,
+        course_slug,
+        catalogues: serde_json::from_str(&catalogues).map_err(|_| {
+            ApiError::Database(sqlx::Error::Protocol(
+                "workspace catalogue refs did not serialize".into(),
+            ))
+        })?,
         updated_at,
     }))
+}
+
+async fn validate_workspace_binding(
+    state: &AppState,
+    input: &WorkspaceInput,
+) -> Result<(Option<String>, String), ApiError> {
+    let Some(course_slug) = input.course_slug.as_ref() else {
+        if input.catalogues.is_empty() {
+            return Ok((None, "[]".into()));
+        }
+        return Err(ApiError::BadRequest(
+            "workspace catalogue pins require a course slug".into(),
+        ));
+    };
+    valid_name(course_slug, "course slug")?;
+    let course_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
+        .bind(course_slug)
+        .fetch_optional(&state.database)
+        .await?
+        .is_some();
+    if !course_exists {
+        return Err(ApiError::BadRequest(format!(
+            "course '{course_slug}' does not exist"
+        )));
+    }
+    for catalogue in &input.catalogues {
+        let actual = sqlx::query_scalar::<_, String>(
+            "SELECT hash FROM catalogues WHERE id = ? AND version = ?",
+        )
+        .bind(&catalogue.id)
+        .bind(catalogue.version)
+        .fetch_optional(&state.database)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "catalogue {} version {} is not stored",
+                catalogue.id, catalogue.version
+            ))
+        })?;
+        if actual != catalogue.hash {
+            return Err(ApiError::BadRequest(format!(
+                "catalogue {} version {} has a different hash",
+                catalogue.id, catalogue.version
+            )));
+        }
+    }
+    Ok((
+        Some(course_slug.clone()),
+        json_text(serde_json::to_value(&input.catalogues).expect("catalogue refs serialize"))?,
+    ))
 }
 
 async fn delete_workspace(
