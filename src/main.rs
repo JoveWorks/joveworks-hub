@@ -227,7 +227,9 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/workspaces", post(create_workspace))
         .route(
             "/api/v1/workspaces/{id}",
-            get(get_workspace).put(replace_workspace),
+            get(get_workspace)
+                .put(replace_workspace)
+                .delete(delete_workspace),
         )
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
@@ -237,7 +239,7 @@ fn app(state: AppState) -> Router {
             CorsLayer::new()
                 .allow_origin(Any)
                 .allow_headers(Any)
-                .allow_methods([Method::GET, Method::POST, Method::PUT]),
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE]),
         )
         .with_state(state)
 }
@@ -648,6 +650,32 @@ async fn replace_workspace(
         document: parse_json(&document)?,
         updated_at,
     }))
+}
+
+async fn delete_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let token = workspace_token(&headers)?;
+    let result = sqlx::query("DELETE FROM workspaces WHERE id = ? AND edit_token_hash = ?")
+        .bind(&id)
+        .bind(sha256(token))
+        .execute(&state.database)
+        .await?;
+    if result.rows_affected() != 0 {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM workspaces WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.database)
+        .await?
+        .is_some();
+    Err(if exists {
+        ApiError::Unauthorized
+    } else {
+        ApiError::NotFound
+    })
 }
 
 /// The human-facing, intentionally short publication URL. It will become the
@@ -1074,6 +1102,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1092,6 +1121,32 @@ mod tests {
         assert_eq!(saved["title"], "Belt study v2");
         assert_eq!(saved["document"]["id"], "student-belt-study-v2");
         assert!(saved.get("editToken").is_none());
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{id}"))
+                    .header(WORKSPACE_TOKEN_HEADER, token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

@@ -227,6 +227,12 @@ X-JoveWorks-Workspace-Token: <editToken>
 It replaces the workspace and returns its new snapshot with `200 OK`. An
 unknown workspace is `404`; a missing or incorrect edit token is `401`.
 
+### `DELETE /api/v1/workspaces/{id}`
+
+Requires the same workspace-token header and returns `204 No Content`. It is
+intended for the owning browser's workspace library; a shared reader cannot
+delete someone else's work.
+
 ## Immutability, ETags, and caching
 
 Catalogue revisions and publications are immutable. Clients should therefore
