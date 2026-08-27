@@ -110,6 +110,10 @@ struct CourseManifest {
     title: String,
     theme: Option<Value>,
     publications: Vec<PublicationSummary>,
+    /// Immutable catalogue revisions required by at least one publication in
+    /// this course. The editor can use these to populate its course menu
+    /// before opening an individual NodeBook.
+    catalogues: Vec<CatalogueRef>,
 }
 
 #[derive(Serialize)]
@@ -125,6 +129,14 @@ struct CourseSummary {
     slug: String,
     title: String,
     theme: Option<Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CourseCatalogues {
+    protocol_version: u8,
+    course_slug: String,
+    catalogues: Vec<CatalogueRef>,
 }
 
 #[derive(Serialize)]
@@ -269,6 +281,10 @@ fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/.well-known/joveworks", get(discovery))
         .route("/api/v1/courses", get(list_courses))
+        .route(
+            "/api/v1/courses/{slug}/catalogues",
+            get(list_course_catalogues),
+        )
         .route("/api/v1/courses/{slug}", get(get_course).post(put_course))
         .route(
             "/api/v1/catalogues/{id}/{version}",
@@ -464,13 +480,73 @@ async fn get_course(
             })
         })
         .collect::<Result<_, ApiError>>()?;
+    let catalogues = course_catalogues(&state.database, &slug).await?;
     Ok(Json(CourseManifest {
         protocol_version: PROTOCOL_VERSION,
         slug,
         title: course.0,
         theme: course.1.map(|text| parse_json(&text)).transpose()?,
         publications,
+        catalogues,
     }))
+}
+
+/// Lists the immutable catalogue revisions used by this course's published
+/// material. Catalogue content remains available from its canonical endpoint,
+/// so clients can cache and retrieve each exact pinned revision independently.
+async fn list_course_catalogues(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<CourseCatalogues>, ApiError> {
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
+        .bind(&slug)
+        .fetch_optional(&state.database)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(CourseCatalogues {
+        protocol_version: PROTOCOL_VERSION,
+        catalogues: course_catalogues(&state.database, &slug).await?,
+        course_slug: slug,
+    }))
+}
+
+async fn course_catalogues(
+    database: &SqlitePool,
+    course_slug: &str,
+) -> Result<Vec<CatalogueRef>, ApiError> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT p.catalogues_json
+         FROM publications p JOIN course_publications cp ON cp.publication_id = p.id
+         WHERE cp.course_slug = ?",
+    )
+    .bind(course_slug)
+    .fetch_all(database)
+    .await?;
+
+    let mut catalogues = Vec::new();
+    for row in rows {
+        let references: Vec<CatalogueRef> = serde_json::from_str(&row).map_err(|_| {
+            ApiError::Database(sqlx::Error::Protocol(
+                "stored catalogue refs are invalid".into(),
+            ))
+        })?;
+        for reference in references {
+            if !catalogues.iter().any(|known: &CatalogueRef| {
+                known.id == reference.id && known.version == reference.version
+            }) {
+                catalogues.push(reference);
+            }
+        }
+    }
+    catalogues.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.version.cmp(&right.version))
+    });
+    Ok(catalogues)
 }
 
 async fn put_catalogue(
@@ -1342,7 +1418,7 @@ mod tests {
                 json!({
                     "title": "A published NodeBook",
                     "document": { "schemaVersion": 1, "id": "published-nodebook" },
-                    "catalogues": [reference],
+                    "catalogues": [reference.clone()],
                     "courses": ["machine-design-2026"]
                 }),
             ))
@@ -1350,6 +1426,35 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let publication_id = json_body(response).await["id"].as_str().unwrap().to_owned();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/courses/machine-design-2026")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let course = json_body(response).await;
+        assert_eq!(course["catalogues"], json!([reference.clone()]));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let catalogues = json_body(response).await;
+        assert_eq!(catalogues["courseSlug"], "machine-design-2026");
+        assert_eq!(catalogues["catalogues"], json!([reference]));
 
         let response = app
             .clone()

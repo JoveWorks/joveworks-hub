@@ -131,11 +131,11 @@ Goal: Hub is maintainable as a real service rather than a laptop process.
 3. Add structured logs, health/readiness checks, metrics, data-retention rules,
    and an upgrade procedure for migrations.
 4. Document DNS, reverse-proxy, firewall, environment-secret, and backup setup
-   in an operator guide. WSL's network launcher remains a development/demo
+   in an operator guide. The network launcher remains a development/demo
    convenience, not the classroom production deployment.
 
 Done when: a fresh server can be deployed, restored from backup, upgraded, and
-observed without depending on one developer's WSL instance.
+observed without depending on one developer's local machine.
 
 ## Decisions to make before Phase 4
 

@@ -25,8 +25,8 @@ personal-project cloud.
 
 The immediate course path is:
 
-1. Integrate the editor with `GET /api/v1/courses`, publication retrieval, and
-   pinned-catalogue retrieval.
+1. Integrate the editor with `GET /api/v1/courses`, course catalogue retrieval,
+   publication retrieval, and pinned-catalogue retrieval.
 2. Build the read-only publication viewer and make `/p/{id}` open it.
 3. Add **Open a copy in editor**, creating a student workspace that retains
    the publication's catalogue pins.

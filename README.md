@@ -28,7 +28,7 @@ curl -i http://127.0.0.1:8080/healthz
 curl http://127.0.0.1:8080/.well-known/joveworks
 ```
 
-### Expose it from WSL
+### Expose it on a local network
 
 For one-command network binding, copy `.env.example` to `.env`, set the admin
 token (and the course token when serving restricted catalogues), then run:
@@ -38,9 +38,10 @@ token (and the course token when serving restricted catalogues), then run:
 ```
 
 It starts the release build at `0.0.0.0:8080`. Set `JOVEWORKS_BIND` in `.env`
-to choose another address or port. Windows can normally reach the service at
-`http://localhost:8080`; use WSL mirrored networking plus the relevant Windows
-firewall rule to accept LAN traffic. For student use, put an HTTPS reverse proxy in front of Hub: the JoveWorks editor accepts plain HTTP only for `localhost`.
+to choose another address or port. Allow the selected port through the host
+firewall only when network access is intended. For student use, put an HTTPS
+reverse proxy in front of Hub: the JoveWorks editor accepts plain HTTP only for
+`localhost`.
 ## Run with Docker Compose
 
 Copy `.env.example` to `.env`, replace both secrets with generated random
@@ -97,6 +98,7 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | `GET /api/v1/courses` | Discover available courses. |
 | `POST /api/v1/courses/{slug}` | Create or update a course. |
 | `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
+| `GET /api/v1/courses/{slug}/catalogues` | Catalogue revisions used by that course's publications. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |
 | `GET /api/v1/catalogues/{id}/{version}` | Retrieve that exact version. |
 | `POST /api/v1/publications` | Publish an immutable NodeBook snapshot. |

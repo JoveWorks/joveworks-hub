@@ -115,11 +115,38 @@ Returns `200 OK`:
   "theme":{"accent":"blue"},
   "publications":[
     {"id":"Ab12Cd34Ef56","title":"Week 3","mode":"viewer","publishedAt":"2026-08-27 09:00:00"}
+  ],
+  "catalogues":[
+    {"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}
   ]
 }
 ```
 
 `publications` is ordered newest first by the stored publication timestamp.
+`catalogues` is the de-duplicated, ID/version-sorted set of immutable
+catalogue revisions pinned by those publications. A client can use it to show
+the course's available catalogues and retrieve a revision from its canonical
+catalogue URL.
+
+### `GET /api/v1/courses/{slug}/catalogues`
+
+Returns the same course-level catalogue list without the course metadata or
+publication summaries:
+
+```json
+{
+  "protocolVersion":1,
+  "courseSlug":"machine-design-2026",
+  "catalogues":[
+    {"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}
+  ]
+}
+```
+
+It returns `404` for an unknown course and an empty `catalogues` array for an
+existing course that has no publications yet. Each listed revision is fetched
+through `GET /api/v1/catalogues/{id}/{version}`; restricted revisions retain
+that endpoint's course-token requirement.
 
 ## Catalogues
 
