@@ -42,11 +42,16 @@
       <button id="upload-catalogue" type="button">Upload catalogue</button>
     </section>
     <section>
-      <h2>4. Publish a NodeBook</h2>
+      <h2>4. Course catalogues</h2>
+      <p class="muted">A course owns its catalogue revisions. Every course download includes their full contents.</p>
+      <div id="catalogues" class="list"><p class="muted">Select a course to manage its catalogue set.</p></div>
+      <button id="save-catalogues" type="button">Save course catalogues</button>
+    </section>
+    <section>
+      <h2>5. Publish a NodeBook</h2>
       <label>NodeBook JSON<input id="nodebook-file" type="file" accept="application/json,.json"></label>
       <label>Publication mode<select id="mode"><option value="viewer">Read-only viewer</option><option value="editor">Editor</option></select></label>
-      <p class="muted">Select every catalogue revision the NodeBook uses.</p>
-      <div id="catalogues" class="list"><p class="muted">Select a course to see its catalogue revisions.</p></div>
+      <p class="muted">This NodeBook is published with the course’s complete pinned catalogue set.</p>
       <button id="publish" type="button">Publish NodeBook</button>
       <p id="publication-link"></p>
     </section>
@@ -59,7 +64,7 @@
 <script>
   const $ = (id) => document.getElementById(id);
   let course = undefined;
-  let uploaded = [];
+  let catalogueLibrary = [];
   const status = (message, error = false) => { const node = $('status'); node.textContent = message; node.className = `status${error ? ' error' : ''}`; };
   const token = () => $('token').value.trim();
   const headers = () => ({ 'Content-Type': 'application/json', 'X-JoveWorks-Admin-Token': token() });
@@ -70,17 +75,16 @@
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
   };
-  const refs = () => [...new Map([...(course?.catalogues || []), ...uploaded].map((ref) => [`${ref.id}\n${ref.version}`, ref])).values()];
-  const selectedRefs = () => refs().filter((ref) => $(`ref:${ref.id}:${ref.version}`)?.checked);
   const renderCatalogues = () => {
     const list = $('catalogues'); list.replaceChildren();
-    const all = refs();
-    if (all.length === 0) { list.innerHTML = '<p class="muted">Upload a catalogue or select a course with published material.</p>'; return; }
-    for (const ref of all) {
+    if (!course) { list.innerHTML = '<p class="muted">Select a course to manage its catalogue set.</p>'; return; }
+    if (catalogueLibrary.length === 0) { list.innerHTML = '<p class="muted">No catalogue revisions yet. Upload one first.</p>'; return; }
+    const attached = new Set(course.catalogues.map((ref) => `${ref.id}\n${ref.version}`));
+    for (const ref of catalogueLibrary) {
       const label = document.createElement('label'); label.className = 'item catalogue-choice';
-      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = true;
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = attached.has(`${ref.id}\n${ref.version}`);
       const text = document.createElement('span'); text.textContent = `${ref.id} · version ${ref.version}`;
-      const hash = document.createElement('small'); hash.textContent = ref.hash.slice(0, 12);
+      const hash = document.createElement('small'); hash.textContent = `${ref.restricted ? 'restricted · ' : ''}${ref.hash.slice(0, 12)}`;
       label.append(checkbox, text, hash); list.append(label);
     }
   };
@@ -91,9 +95,10 @@
     for (const publication of course.publications) { const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title; const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`; row.append(meta); list.append(row); }
     renderCatalogues();
   };
-  const loadCourse = async (slug) => { course = await request(`/api/v1/courses/${encodeURIComponent(slug)}`); uploaded = []; renderCourse(); };
+  const loadCatalogueLibrary = async () => { catalogueLibrary = (await request('/api/v1/admin/catalogues', { headers: headers() })).catalogues; };
+  const loadCourse = async (slug) => { course = await request(`/api/v1/courses/${encodeURIComponent(slug)}`, { headers: headers() }); renderCourse(); };
   $('load-courses').onclick = async () => {
-    try { const index = await request('/api/v1/courses'); const select = $('courses'); select.replaceChildren();
+    try { const [index] = await Promise.all([request('/api/v1/courses'), loadCatalogueLibrary()]); const select = $('courses'); select.replaceChildren();
       if (index.courses.length === 0) select.add(new Option('No courses yet', ''));
       for (const item of index.courses) select.add(new Option(item.title, item.slug));
       if (index.courses[0]) { select.value = index.courses[0].slug; await loadCourse(select.value); }
@@ -114,17 +119,25 @@
     if (!token()) return status('Enter the administrator token first.', true);
     if (!file || !Number.isInteger(version) || version < 1) return status('Choose a catalogue file and positive version.', true);
     try { const reference = await request(`/api/v1/admin/catalogues/${version}`, { method: 'POST', headers: headers(), body: await file.text() });
-      uploaded = [...uploaded.filter((ref) => ref.id !== reference.id || ref.version !== reference.version), reference]; renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Publish a NodeBook to add it to this course.`);
+      await loadCatalogueLibrary(); renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Select it below to add it to a course.`);
+    } catch (error) { status(error.message, true); }
+  };
+  $('save-catalogues').onclick = async () => {
+    if (!token()) return status('Enter the administrator token first.', true);
+    if (!course) return status('Select or create a course first.', true);
+    const catalogues = catalogueLibrary.filter((ref) => $(`ref:${ref.id}:${ref.version}`)?.checked).map(({ id, version, hash }) => ({ id, version, hash }));
+    try { await request(`/api/v1/courses/${encodeURIComponent(course.slug)}/catalogues`, { method: 'PUT', headers: headers(), body: JSON.stringify({ catalogues }) });
+      await loadCourse(course.slug); status(`Saved ${catalogues.length} catalogue revision${catalogues.length === 1 ? '' : 's'} for ${course.title}.`);
     } catch (error) { status(error.message, true); }
   };
   $('publish').onclick = async () => {
-    const file = $('nodebook-file').files[0], selected = selectedRefs();
+    const file = $('nodebook-file').files[0];
     if (!token()) return status('Enter the administrator token first.', true);
     if (!course) return status('Select or create a course first.', true);
     if (!file) return status('Choose a NodeBook JSON file.', true);
-    if (selected.length === 0) return status('Select at least one catalogue revision.', true);
+    if (course.catalogues.length === 0) return status('Add at least one catalogue revision to the course first.', true);
     try { const document = JSON.parse(await file.text()); if (!document || typeof document.title !== 'string') throw new Error('The NodeBook file must contain a title.');
-      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title: document.title, mode: $('mode').value, document, catalogues: selected, courses: [course.slug] }) });
+      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title: document.title, mode: $('mode').value, document, catalogues: course.catalogues, courses: [course.slug] }) });
       const link = new URL(`/p/${created.id}`, window.location.origin).href; $('publication-link').replaceChildren(); const anchor = document.createElement('a'); anchor.href = link; anchor.textContent = link; $('publication-link').append('Published: ', anchor);
       await loadCourse(course.slug); status(`Published ${document.title}.`);
     } catch (error) { status(error.message, true); }

@@ -110,10 +110,10 @@ struct CourseManifest {
     title: String,
     theme: Option<Value>,
     publications: Vec<PublicationSummary>,
-    /// Immutable catalogue revisions required by at least one publication in
-    /// this course. The editor can use these to populate its course menu
-    /// before opening an individual NodeBook.
+    /// Immutable catalogue revisions explicitly pinned to this course.
     catalogues: Vec<CatalogueRef>,
+    /// Full immutable documents, included when a course is opened.
+    catalogue_contents: Vec<CatalogueDocument>,
 }
 
 #[derive(Serialize)]
@@ -136,6 +136,36 @@ struct CourseSummary {
 struct CourseCatalogues {
     protocol_version: u8,
     course_slug: String,
+    catalogues: Vec<CatalogueRef>,
+    catalogue_contents: Vec<CatalogueDocument>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogueDocument {
+    id: String,
+    version: i64,
+    hash: String,
+    content: Value,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogueAdminSummary {
+    id: String,
+    version: i64,
+    hash: String,
+    restricted: bool,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct CatalogueIndex {
+    catalogues: Vec<CatalogueAdminSummary>,
+}
+
+#[derive(Deserialize)]
+struct CourseCataloguesInput {
     catalogues: Vec<CatalogueRef>,
 }
 
@@ -284,7 +314,7 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/courses", get(list_courses))
         .route(
             "/api/v1/courses/{slug}/catalogues",
-            get(list_course_catalogues),
+            get(list_course_catalogues).put(put_course_catalogues),
         )
         .route("/api/v1/courses/{slug}", get(get_course).post(put_course))
         .route(
@@ -295,6 +325,7 @@ fn app(state: AppState) -> Router {
             "/api/v1/admin/catalogues/{version}",
             post(put_admin_catalogue),
         )
+        .route("/api/v1/admin/catalogues", get(list_admin_catalogues))
         .route("/api/v1/publications", post(create_publication))
         .route("/api/v1/publications/{id}", get(get_publication))
         .route("/api/v1/workspaces", post(create_workspace))
@@ -398,6 +429,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "student_shares",
         include_str!("../migrations/0004_student_shares.sql"),
     ),
+    (
+        5,
+        "course_catalogues",
+        include_str!("../migrations/0005_course_catalogues.sql"),
+    ),
 ];
 
 async fn healthz() -> StatusCode {
@@ -463,6 +499,7 @@ async fn list_courses(State(state): State<AppState>) -> Result<Json<CourseIndex>
 
 async fn get_course(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<CourseManifest>, ApiError> {
     let course = sqlx::query_as::<_, (String, Option<String>)>(
@@ -492,6 +529,7 @@ async fn get_course(
         })
         .collect::<Result<_, ApiError>>()?;
     let catalogues = course_catalogues(&state.database, &slug).await?;
+    let catalogue_contents = course_catalogue_contents(&state, &headers, &slug).await?;
     Ok(Json(CourseManifest {
         protocol_version: PROTOCOL_VERSION,
         slug,
@@ -499,14 +537,14 @@ async fn get_course(
         theme: course.1.map(|text| parse_json(&text)).transpose()?,
         publications,
         catalogues,
+        catalogue_contents,
     }))
 }
 
-/// Lists the immutable catalogue revisions used by this course's published
-/// material. Catalogue content remains available from its canonical endpoint,
-/// so clients can cache and retrieve each exact pinned revision independently.
+/// Lists the immutable catalogue revisions explicitly pinned to this course.
 async fn list_course_catalogues(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(slug): Path<String>,
 ) -> Result<Json<CourseCatalogues>, ApiError> {
     let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
@@ -520,44 +558,100 @@ async fn list_course_catalogues(
     Ok(Json(CourseCatalogues {
         protocol_version: PROTOCOL_VERSION,
         catalogues: course_catalogues(&state.database, &slug).await?,
+        catalogue_contents: course_catalogue_contents(&state, &headers, &slug).await?,
         course_slug: slug,
     }))
+}
+
+async fn put_course_catalogues(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    Json(input): Json<CourseCataloguesInput>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&headers, &state)?;
+    valid_name(&slug, "course slug")?;
+    validate_catalogue_refs(&state.database, &input.catalogues).await?;
+    let mut transaction = state.database.begin().await?;
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
+        .bind(&slug)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some();
+    if !exists {
+        return Err(ApiError::NotFound);
+    }
+    sqlx::query("DELETE FROM course_catalogues WHERE course_slug = ?")
+        .bind(&slug)
+        .execute(&mut *transaction)
+        .await?;
+    for catalogue in input.catalogues {
+        sqlx::query(
+            "INSERT INTO course_catalogues (course_slug, catalogue_id, catalogue_version) VALUES (?, ?, ?)",
+        )
+        .bind(&slug)
+        .bind(catalogue.id)
+        .bind(catalogue.version)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn course_catalogues(
     database: &SqlitePool,
     course_slug: &str,
 ) -> Result<Vec<CatalogueRef>, ApiError> {
-    let rows = sqlx::query_scalar::<_, String>(
-        "SELECT p.catalogues_json
-         FROM publications p JOIN course_publications cp ON cp.publication_id = p.id
-         WHERE cp.course_slug = ?",
+    let rows = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT c.id, c.version, c.hash
+         FROM catalogues c JOIN course_catalogues cc
+           ON cc.catalogue_id = c.id AND cc.catalogue_version = c.version
+         WHERE cc.course_slug = ? ORDER BY c.id, c.version",
     )
     .bind(course_slug)
     .fetch_all(database)
     .await?;
 
-    let mut catalogues = Vec::new();
-    for row in rows {
-        let references: Vec<CatalogueRef> = serde_json::from_str(&row).map_err(|_| {
-            ApiError::Database(sqlx::Error::Protocol(
-                "stored catalogue refs are invalid".into(),
-            ))
-        })?;
-        for reference in references {
-            if !catalogues.iter().any(|known: &CatalogueRef| {
-                known.id == reference.id && known.version == reference.version
-            }) {
-                catalogues.push(reference);
-            }
+    Ok(rows
+        .into_iter()
+        .map(|(id, version, hash)| CatalogueRef { id, version, hash })
+        .collect())
+}
+
+async fn course_catalogue_contents(
+    state: &AppState,
+    headers: &HeaderMap,
+    course_slug: &str,
+) -> Result<Vec<CatalogueDocument>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, i64, String, bool, String)>(
+        "SELECT c.id, c.version, c.hash, c.restricted, c.content_json
+         FROM catalogues c JOIN course_catalogues cc
+           ON cc.catalogue_id = c.id AND cc.catalogue_version = c.version
+         WHERE cc.course_slug = ? ORDER BY c.id, c.version",
+    )
+    .bind(course_slug)
+    .fetch_all(&state.database)
+    .await?;
+    if rows.iter().any(|row| row.3) {
+        let is_admin = headers
+            .get(ADMIN_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            == Some(state.admin_token.as_ref());
+        if !is_admin {
+            require_course_access(headers, state)?;
         }
     }
-    catalogues.sort_by(|left, right| {
-        left.id
-            .cmp(&right.id)
-            .then(left.version.cmp(&right.version))
-    });
-    Ok(catalogues)
+    rows.into_iter()
+        .map(|(id, version, hash, _, content)| {
+            Ok(CatalogueDocument {
+                id,
+                version,
+                hash,
+                content: parse_json(&content)?,
+            })
+        })
+        .collect()
 }
 
 async fn put_catalogue(
@@ -590,6 +684,60 @@ async fn put_admin_catalogue(
         .ok_or_else(|| ApiError::BadRequest("catalogue content.id is required".into()))?
         .to_owned();
     store_catalogue(&state, id, version, content).await
+}
+
+async fn list_admin_catalogues(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CatalogueIndex>, ApiError> {
+    require_admin(&headers, &state)?;
+    let rows = sqlx::query_as::<_, (String, i64, String, bool, String)>(
+        "SELECT id, version, hash, restricted, created_at FROM catalogues ORDER BY id, version",
+    )
+    .fetch_all(&state.database)
+    .await?;
+    Ok(Json(CatalogueIndex {
+        catalogues: rows
+            .into_iter()
+            .map(
+                |(id, version, hash, restricted, created_at)| CatalogueAdminSummary {
+                    id,
+                    version,
+                    hash,
+                    restricted,
+                    created_at,
+                },
+            )
+            .collect(),
+    }))
+}
+
+async fn validate_catalogue_refs(
+    database: &SqlitePool,
+    catalogues: &[CatalogueRef],
+) -> Result<(), ApiError> {
+    for catalogue in catalogues {
+        let actual = sqlx::query_scalar::<_, String>(
+            "SELECT hash FROM catalogues WHERE id = ? AND version = ?",
+        )
+        .bind(&catalogue.id)
+        .bind(catalogue.version)
+        .fetch_optional(database)
+        .await?
+        .ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "catalogue {} version {} is not stored",
+                catalogue.id, catalogue.version
+            ))
+        })?;
+        if actual != catalogue.hash {
+            return Err(ApiError::BadRequest(format!(
+                "catalogue {} version {} has a different hash",
+                catalogue.id, catalogue.version
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn store_catalogue(
@@ -1388,6 +1536,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(preserved_link, 1);
+
+        let preserved_catalogue_pin: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM course_catalogues
+             WHERE course_slug = 'legacy-course' AND catalogue_id = 'existing' AND catalogue_version = 1",
+        )
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(preserved_catalogue_pin, 1);
     }
 
     #[tokio::test]
@@ -1479,6 +1636,23 @@ mod tests {
 
         let response = app
             .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::from(
+                        json!({ "catalogues": [reference.clone()] }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .clone()
             .oneshot(json_request(
                 "/api/v1/publications",
                 json!({
@@ -1506,6 +1680,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let course = json_body(response).await;
         assert_eq!(course["catalogues"], json!([reference.clone()]));
+        assert_eq!(course["catalogueContents"][0]["content"], catalogue);
 
         let response = app
             .clone()
@@ -1521,6 +1696,10 @@ mod tests {
         let catalogues = json_body(response).await;
         assert_eq!(catalogues["courseSlug"], "machine-design-2026");
         assert_eq!(catalogues["catalogues"], json!([reference]));
+        assert_eq!(
+            catalogues["catalogueContents"][0]["content"]["id"],
+            "public-example"
+        );
 
         let response = app
             .clone()
@@ -1736,6 +1915,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        let reference = json_body(response).await;
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "/api/v1/courses/restricted-course",
+                json!({ "title": "Restricted course" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/courses/restricted-course/catalogues")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::from(json!({ "catalogues": [reference] }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/courses/restricted-course")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/courses/restricted-course")
+                    .header(COURSE_TOKEN_HEADER, "course-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await["catalogueContents"][0]["content"]["id"],
+            "restricted-example"
+        );
 
         let response = app
             .clone()

@@ -1,9 +1,10 @@
 # JoveWorks Hub
 
 JoveWorks Hub is a small, self-hosted backend for distributing immutable
-catalogue versions and NodeBook publications. A publication has a random short
-identifier; it stores a graph document and pins the catalogue versions needed
-to open it. The graph itself never embeds formula bodies.
+catalogue versions and NodeBook publications. Courses explicitly pin their
+catalogue revisions; opening a course includes the full pinned catalogues. A
+publication has a random short identifier and retains its own historical pins.
+The graph itself never embeds formula bodies.
 
 This is an MVP distribution API, not yet student cloud storage or live
 collaboration. Writes require an administrator token. Restricted catalogues
@@ -86,8 +87,9 @@ administrator token for the current browser session; Hub never stores it and
 the console does not persist it in browser storage. Catalogue files and
 NodeBooks are read locally by the browser, then sent only to the same Hub.
 
-A catalogue becomes available in a course after it is pinned by a publication.
-Choose every catalogue revision a NodeBook needs before publishing it.
+Use the catalogue-library checklist to attach immutable revisions to a course.
+The course’s complete pinned set is then used when publishing NodeBooks and is
+included in the course response.
 
 ## API v1
 
@@ -110,7 +112,8 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | `GET /api/v1/courses` | Discover available courses. |
 | `POST /api/v1/courses/{slug}` | Create or update a course. |
 | `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
-| `GET /api/v1/courses/{slug}/catalogues` | Catalogue revisions used by that course's publications. |
+| `GET`/`PUT /api/v1/courses/{slug}/catalogues` | Get full course catalogue bundle / replace its pinned revision set. |
+| `GET /api/v1/admin/catalogues` | List catalogue revisions for the admin console. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |
 | `GET /api/v1/catalogues/{id}/{version}` | Retrieve that exact version. |
 | `POST /api/v1/publications` | Publish an immutable NodeBook snapshot. |

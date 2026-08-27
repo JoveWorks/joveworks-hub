@@ -26,8 +26,9 @@ X-JoveWorks-Admin-Token: <JOVEWORKS_ADMIN_TOKEN>
 ```
 
 The protected writes are `POST /api/v1/courses/{slug}`,
-`POST /api/v1/catalogues/{id}/{version}`, and
-`POST /api/v1/publications`. A missing, malformed, or incorrect header is
+`PUT /api/v1/courses/{slug}/catalogues`, `POST /api/v1/catalogues/{id}/{version}`,
+the admin-console catalogue upload, and `POST /api/v1/publications`.
+`GET /api/v1/admin/catalogues` also requires this header. A missing, malformed, or incorrect header is
 `401 Unauthorized`; the token is never returned in a response.
 
 Retrieving a catalogue whose stored content has `restricted: true` additionally
@@ -38,8 +39,9 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 ```
 
 If no course token is configured, restricted catalogue retrieval is refused.
-The response is `401 Unauthorized`. Public catalogues, publications, course
-manifests, discovery, and health do not require either token.
+The response is `401 Unauthorized`. A course response containing restricted
+catalogues also requires that course token (or the admin token). Public
+catalogues, publications, discovery, and health do not require either token.
 
 ## Common response and error rules
 
@@ -116,37 +118,38 @@ Returns `200 OK`:
   "publications":[
     {"id":"Ab12Cd34Ef56","title":"Week 3","mode":"viewer","publishedAt":"2026-08-27 09:00:00"}
   ],
-  "catalogues":[
-    {"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}
-  ]
+  "catalogues":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}],
+  "catalogueContents":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>","content":{"schemaVersion":1,"id":"public-example","restricted":false,"formulas":[]}}]
 }
 ```
 
 `publications` is ordered newest first by the stored publication timestamp.
-`catalogues` is the de-duplicated, ID/version-sorted set of immutable
-catalogue revisions pinned by those publications. A client can use it to show
-the course's available catalogues and retrieve a revision from its canonical
-catalogue URL.
+`catalogues` is the ID/version-sorted set of immutable revisions explicitly
+pinned to the course. `catalogueContents` includes each full document, so a
+client can load the complete course catalogue set in the same response.
 
 ### `GET /api/v1/courses/{slug}/catalogues`
 
-Returns the same course-level catalogue list without the course metadata or
-publication summaries:
+Returns the same course-level refs and full catalogue documents without course
+metadata or publication summaries:
 
 ```json
 {
   "protocolVersion":1,
   "courseSlug":"machine-design-2026",
-  "catalogues":[
-    {"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}
-  ]
+  "catalogues":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}],
+  "catalogueContents":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>","content":{"schemaVersion":1,"id":"public-example","restricted":false,"formulas":[]}}]
 }
 ```
 
-It returns `404` for an unknown course and an empty `catalogues` array for an
-existing course that has no publications yet. Each listed revision is fetched
-through `GET /api/v1/catalogues/{id}/{version}`; restricted revisions retain
-that endpoint's course-token requirement.
+It returns `404` for an unknown course and empty arrays for a course with no
+catalogues. Restricted course bundles require the course token.
+
+### `PUT /api/v1/courses/{slug}/catalogues`
+
+Requires the admin header. Replaces the course's pinned catalogue set with the
+provided immutable references. Every reference must already exist and match its
+stored hash. An empty set is allowed.
 
 ## Catalogues
 
@@ -176,6 +179,11 @@ content is identical.
 Returns the stored catalogue `content` itself (not the upload wrapper) with
 `200 OK`. A restricted entry first performs the course-token check. A missing
 entry returns `404`.
+
+### `GET /api/v1/admin/catalogues`
+
+Requires the admin header and returns every stored immutable revision, ordered
+by id and version. It powers the course catalogue checklist in `/admin`.
 
 ## Publications
 
