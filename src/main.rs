@@ -114,6 +114,21 @@ struct CourseManifest {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CourseIndex {
+    protocol_version: u8,
+    courses: Vec<CourseSummary>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CourseSummary {
+    slug: String,
+    title: String,
+    theme: Option<Value>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PublicationSummary {
     id: String,
     title: String,
@@ -253,6 +268,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/.well-known/joveworks", get(discovery))
+        .route("/api/v1/courses", get(list_courses))
         .route("/api/v1/courses/{slug}", get(get_course).post(put_course))
         .route(
             "/api/v1/catalogues/{id}/{version}",
@@ -394,6 +410,28 @@ async fn put_course(
     .execute(&state.database)
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_courses(State(state): State<AppState>) -> Result<Json<CourseIndex>, ApiError> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT slug, title, theme_json FROM courses ORDER BY title COLLATE NOCASE, slug",
+    )
+    .fetch_all(&state.database)
+    .await?;
+    let courses = rows
+        .into_iter()
+        .map(|(slug, title, theme)| {
+            Ok(CourseSummary {
+                slug,
+                title,
+                theme: theme.map(|text| parse_json(&text)).transpose()?,
+            })
+        })
+        .collect::<Result<_, ApiError>>()?;
+    Ok(Json(CourseIndex {
+        protocol_version: PROTOCOL_VERSION,
+        courses,
+    }))
 }
 
 async fn get_course(
@@ -1208,6 +1246,46 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(preserved_link, 1);
+    }
+
+    #[tokio::test]
+    async fn course_index_lists_course_selection_metadata_in_title_order() {
+        let app = test_app().await;
+        for (slug, title, theme) in [
+            ("zeta", "Zeta course", None),
+            ("alpha", "Alpha course", Some(json!({ "accent": "blue" }))),
+            ("algebra", "algebra course", None),
+        ] {
+            let mut body = json!({ "title": title });
+            if let Some(theme) = theme {
+                body["theme"] = theme;
+            }
+            let response = app
+                .clone()
+                .oneshot(json_request(&format!("/api/v1/courses/{slug}"), body))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/courses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
+        let body = json_body(response).await;
+        assert_eq!(body["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(body["courses"][0]["slug"], "algebra");
+        assert_eq!(body["courses"][1]["slug"], "alpha");
+        assert_eq!(body["courses"][1]["theme"]["accent"], "blue");
+        assert_eq!(body["courses"][2]["slug"], "zeta");
+        assert_eq!(body["courses"][0].get("publications"), None);
     }
 
     fn json_request(uri: &str, body: Value) -> Request<Body> {

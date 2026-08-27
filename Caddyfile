@@ -1,3 +1,0 @@
-{$JOVEWORKS_DOMAIN} {
-    reverse_proxy hub:8080
-}

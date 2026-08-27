@@ -57,19 +57,24 @@ restricted catalogue.
 
 ### Production HTTPS and backups
 
-Set the public URL, editor URL, and `JOVEWORKS_DOMAIN` in `.env`, point the
-domain's DNS at the host, then run:
+Set the public URL and editor URL in `.env`, configure your HTTPS reverse proxy
+to send traffic to `127.0.0.1:8080`, then run:
 
 ```sh
 docker compose -f compose.production.yaml up --build -d
 ```
 
-The production composition places Caddy in front of Hub for automatic HTTPS;
-Hub itself is not published to the Internet. Hub rejects bodies larger than
-1 MiB and applies a basic 600-request/minute service-wide guard. Back up the
-SQLite database before upgrades. For a local database, run
+The production composition publishes Hub only on the host loopback interface,
+so a host Nginx reverse proxy can reach it while it remains inaccessible from
+the Internet. Set `JOVEWORKS_HOST_BIND` only when your reverse proxy is on a
+different host, and firewall port 8080 to that proxy. Hub rejects bodies larger
+than 1 MiB and applies a basic 600-request/minute service-wide guard. Back up
+the SQLite database before upgrades. For a local database, run
 `./scripts/backup-db.sh`; Docker-volume backups should use the same SQLite
 `.backup` operation from a maintenance container.
+
+For the full DNS, router/firewall, TLS, verification, and upgrade sequence,
+see [the homelab deployment guide](docs/HOMELAB-DEPLOYMENT.md).
 
 ## API v1
 
@@ -89,6 +94,7 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | --- | --- |
 | `GET /healthz` | Container health probe (`204 No Content`). |
 | `GET /.well-known/joveworks` | Hub discovery and protocol version. |
+| `GET /api/v1/courses` | Discover available courses. |
 | `POST /api/v1/courses/{slug}` | Create or update a course. |
 | `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |

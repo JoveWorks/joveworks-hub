@@ -85,6 +85,24 @@ upsert. The request requires the admin header and has this shape:
 be any JSON value. Success is `204 No Content`. Updating a course changes its
 title/theme but does not change or delete its publications.
 
+### `GET /api/v1/courses`
+
+Returns the courses available from this Hub without requiring a course slug.
+It is unauthenticated and ordered case-insensitively by title, then by slug:
+
+```json
+{
+  "protocolVersion":1,
+  "courses":[
+    {"slug":"machine-design-2026","title":"Machine design 2026","theme":{"accent":"blue"}}
+  ]
+}
+```
+
+`courses` is an empty array when no courses have been created. The index
+contains only course-selection metadata; retrieve an individual course to get
+its publications.
+
 ### `GET /api/v1/courses/{slug}`
 
 Returns `200 OK`:
@@ -259,7 +277,7 @@ The current server does not evaluate `If-None-Match` and does not return
 response (after the course-token check). Clients may use the ETag for
 integrity comparison, but should not depend on conditional GET behavior yet.
 
-Publication, course, discovery, and redirect responses do not currently set
+Publication, course index/manifest, discovery, and redirect responses do not currently set
 an explicit `Cache-Control` or `ETag` header. A client or deployment proxy
 must not invent long-lived caching for mutable course manifests. For
 immutable publication and public catalogue resources, deployments may add a
