@@ -95,6 +95,17 @@ before retiring material.
 
 ## API v1
 
+Hub's HTTP contract is fully specified in [docs/API-v1.md](docs/API-v1.md).
+It is a versioned, deployment-independent protocol: the JoveWorks editor and
+any other client speak only this contract, so **anyone can implement their
+own Hub-compatible backend**, in any language or storage engine, without
+depending on this repository's server at all. If you'd rather run your own
+infrastructure than trust someone else's hosted Hub for security or data
+custody, see [docs/BUILD-YOUR-OWN-HUB.md](docs/BUILD-YOUR-OWN-HUB.md) for the
+implementer's guide, the exact catalogue-hash algorithm, and a conformance
+script (`scripts/conformance-check.sh`) that checks any Hub deployment —
+this one or your own — against the documented behavior.
+
 All write requests use this header:
 
 ```text
@@ -107,6 +118,9 @@ Restricted catalogue downloads additionally require:
 X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 ```
 
+Student workspace reads/writes/deletes require a third, per-workspace token
+returned once by `POST /api/v1/workspaces` (see below).
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /healthz` | Container health probe (`204 No Content`). |
@@ -116,12 +130,21 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
 | `GET`/`PUT /api/v1/courses/{slug}/catalogues` | Get full course catalogue bundle / replace its pinned revision set. |
 | `GET /api/v1/admin/catalogues` | List catalogue revisions for the admin console. |
+| `POST /api/v1/admin/catalogues/{version}` | Upload a JSON/YAML catalogue file, id read from the document. |
 | `DELETE /api/v1/admin/catalogues/{id}/{version}` | Delete an unused catalogue revision. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |
 | `GET /api/v1/catalogues/{id}/{version}` | Retrieve that exact version. |
 | `POST /api/v1/publications` | Publish an immutable NodeBook snapshot. |
 | `GET /api/v1/publications/{id}` | Retrieve a published NodeBook. |
 | `GET /p/{id}` | Short human-facing link; currently redirects to its API resource. |
+| `POST /api/v1/workspaces` | Create a private student workspace; no admin token needed. |
+| `GET`/`PUT`/`DELETE /api/v1/workspaces/{id}` | Load, save, or delete a workspace (requires its edit token). |
+| `POST /api/v1/workspaces/{id}/shares` | Create a read-only share link for a workspace. |
+| `GET /api/v1/shares/{id}` / `GET /s/{id}` | Read a shared workspace / its short redirect link. |
+
+The full request/response shapes, validation rules, error contract, and
+caching semantics for every route above are in
+[docs/API-v1.md](docs/API-v1.md), not repeated here.
 
 A catalogue upload body wraps the existing catalogue JSON:
 
@@ -171,8 +194,11 @@ published with. The script prints the short `/p/<id>` link on success.
 Set `JOVEWORKS_PUBLIC_URL` to Hub's public HTTPS origin and
 `JOVEWORKS_EDITOR_URL` to the editor's public HTTPS origin. Hub then turns
 `https://hub.example.edu/p/<publication-id>` into an editor link that opens
-the immutable published NodeBook automatically. Personal workspaces remain
-private browser-owned storage and are not shareable URLs.
+the immutable published NodeBook automatically. A workspace itself stays
+private, browser-owned storage; a student can additionally opt in to a
+read-only `https://hub.example.edu/s/<share-id>` link via
+`POST /api/v1/workspaces/{id}/shares`, which reflects that one workspace's
+current save and cannot be used to edit or delete it.
 
 ## Deliberate limits
 
