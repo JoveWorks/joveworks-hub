@@ -7,7 +7,7 @@ personal-project cloud.
 | --- | --- | --- |
 | Course catalogue | Courses; course discovery; immutable, hash-pinned catalogue versions; public/restricted catalogue reads | Full catalogue/schema validation; per-course access control |
 | Instructor publishing | Admin-protected course/catalogue/publication API; shell helpers to create a course and publish a NodeBook | Author/note metadata, dry run, multi-catalogue publishing helper, richer validation |
-| Course material | Immutable publications with short IDs and course association | Editor viewer integration; `/p/{id}` is still a redirect, not a reader page |
+| Course material | Immutable publications with short IDs and course association; editor viewer integration; `/p/{id}` redirects into the editor with the publication opened | The publication response does not expose which courses a publication belongs to, so a copy saved from a public `/p/{id}` link cannot be bound to its course or retain its catalogue pins |
 | Student work | Anonymous private workspaces, protected by an edit token; update/delete; course catalogue pins | User identity, workspace library/listing, cross-device recovery, revision history/conflict handling |
 | Sharing | Owner can create one public read-only share link per workspace | Revoke/rotate shares, expiry, access policy, snapshot sharing |
 | Deployment | Docker Compose, SQLite migrations, health endpoint, rate guard, Nginx deployment path | Backup/restore automation, readiness, metrics, audit trail, retention policy |
@@ -23,16 +23,33 @@ personal-project cloud.
 
 ## Course integration
 
-The immediate course path is:
+The editor now integrates with `GET /api/v1/courses`, course catalogue
+retrieval, publication retrieval, and pinned-catalogue retrieval, and `/p/{id}`
+redirects into the editor with the publication opened, both when browsed from
+inside the app and via a public link. Saving a copy from a publication opened
+inside the app creates a student workspace that retains the publication's
+catalogue pins. A copy saved from a public `/p/{id}` link does not, and the
+reason is a missing piece of the API rather than an oversight in the editor.
 
-1. Integrate the editor with `GET /api/v1/courses`, course catalogue retrieval,
-   publication retrieval, and pinned-catalogue retrieval.
-2. Build the read-only publication viewer and make `/p/{id}` open it.
-3. Add **Open a copy in editor**, creating a student workspace that retains
-   the publication's catalogue pins.
-4. For an initial pilot, use public catalogues, or explicitly treat the current
+A public link carries only a Hub address and a publication id. The editor
+therefore synthesises a placeholder course for that path and deliberately
+skips the binding (`packages/editor/src/App.tsx:651-652`), because the Hub
+rejects a workspace whose course slug does not exist — `validate_workspace_binding`
+returns "course '…' does not exist" (`src/main.rs:1172`). Binding the
+placeholder would not preserve the pins; it would make saving fail outright.
+Nor can the pins travel alone: the same function refuses catalogue pins that
+arrive without a course slug (`src/main.rs:1164`).
+
+The blocker is that `get_publication` (`src/main.rs:1005`) does not return the
+publication's course association at all, so the editor has no way to learn the
+real slug from a public link. What remains:
+
+1. Expose a publication's courses in the publication response, then bind the
+   public `/p/{id}` path to the real course slug so a saved copy keeps its
+   catalogue pins. The Hub change must come first.
+2. For an initial pilot, use public catalogues, or explicitly treat the current
    shared course token as a temporary access gate.
-5. Before broadly serving restricted material, choose institutional OIDC or
+3. Before broadly serving restricted material, choose institutional OIDC or
    LMS/LTI and implement users, memberships, and roles.
 
 ## Personal projects
@@ -58,8 +75,15 @@ reproducible.
 
 ## Recommended implementation order
 
-1. Editor publication viewer and fork into a workspace.
-2. Stronger NodeBook, catalogue, and formula-reference validation.
+The editor's publication viewer and the `/p/{id}` open path are done; what
+remains of that first step is the course binding a public link cannot yet
+carry.
+
+1. Expose a publication's courses in the publication response, then bind the
+   public `/p/{id}` path to the real course slug so a saved copy keeps its
+   catalogue pins.
+2. Stronger NodeBook, catalogue, and formula-reference validation — the
+   correctness gap above is the substantial part of this.
 3. Identity decision and course-enrolment integration.
 4. Account-backed personal-project library and revisions.
 5. Submissions and instructor review.
