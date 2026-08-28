@@ -69,8 +69,9 @@ docker compose -f compose.production.yaml up --build -d
 The production composition publishes Hub only on the host loopback interface,
 so a host Nginx reverse proxy can reach it while it remains inaccessible from
 the Internet. Set `JOVEWORKS_HOST_BIND` only when your reverse proxy is on a
-different host, and firewall port 8080 to that proxy. Hub rejects bodies larger
-than 1 MiB and applies a basic 600-request/minute service-wide guard. Back up
+different host, and firewall port 8080 to that proxy. Hub limits compiled
+reports to 1 MiB uncompressed, rejects whole requests above 3 MiB, and applies
+a basic 600-request/minute service-wide guard. Back up
 the SQLite database before upgrades. For a local database, run
 `./scripts/backup-db.sh`; Docker-volume backups should use the same SQLite
 `.backup` operation from a maintenance container.
@@ -119,9 +120,11 @@ X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
 | `DELETE /api/v1/admin/catalogues/{id}/{version}` | Delete an unused catalogue revision. |
 | `POST /api/v1/catalogues/{id}/{version}` | Store an immutable catalogue version. |
 | `GET /api/v1/catalogues/{id}/{version}` | Retrieve that exact version. |
-| `POST /api/v1/publications` | Publish an immutable NodeBook snapshot. |
+| `POST /api/v1/publications` | Promote a stored workspace to an immutable NodeBook snapshot. |
 | `GET /api/v1/publications/{id}` | Retrieve a published NodeBook. |
-| `GET /p/{id}` | Short human-facing link; currently redirects to its API resource. |
+| `GET /api/v1/publications/{id}/notebook` | Retrieve its presentation-only compiled report. |
+| `GET /api/v1/shares/{id}/notebook` | Retrieve the current compiled report for a workspace share. |
+| `GET /p/{id}` / `GET /s/{id}` | Redirect to the matching JoveWorks viewer route. |
 
 A catalogue upload body wraps the existing catalogue JSON:
 
@@ -138,33 +141,32 @@ Publication request shape:
 {
   "title": "Week 3 — belt drive",
   "mode": "viewer",
-  "document": { "schemaVersion": 1, "id": "belt-week-3" },
-  "catalogues": [
-    { "id": "public-example", "version": 1, "hash": "<hash returned by catalogue upload>" }
-  ],
+  "workspaceId": "<stored Hub workspace id>",
   "courses": ["machine-design-2026"]
 }
 ```
 
-Each `POST /api/v1/publications` creates a new immutable random 12-character
-publication ID. Share `https://your-hub.example/p/{id}`. Until the editor is
-wired to Hub, that short route redirects to the immutable JSON resource; the
-link and API contract will not change when it starts serving the NodeBook
-viewer.
+Each `POST /api/v1/publications` copies that workspace's exact graph, catalogue
+pins, and complete compiled report into a new immutable random 12-character
+publication ID. Incomplete student workspaces may be shared but cannot be
+promoted. Share `https://your-hub.example/p/{id}`.
 
 ## Publish course material
 
-Create the course once, then publish a catalogue revision and a NodeBook in
-one command:
+Create the course and upload its catalogue revision first:
 
 ```sh
 ./scripts/create-course.sh machine-design-2026 "Machine design 2026"
-./scripts/publish-nodebook.sh machine-design-2026 ./course-catalogue.json 1 ./belt-study.jove.json
 ```
 
-Publishing never overwrites a catalogue revision. Use a new positive version
-when the catalogue changes; every publication retains the exact hash it was
-published with. The script prints the short `/p/<id>` link on success.
+After saving the finished workspace from JoveWorks, promote it with:
+
+```sh
+./scripts/publish-workspace.sh WORKSPACE_ID "Week 3 — belt drive" viewer machine-design-2026
+```
+
+Publishing never overwrites a catalogue revision. Every publication retains
+the graph, report, and exact catalogue hashes captured by that workspace save.
 
 ## Course-material links
 

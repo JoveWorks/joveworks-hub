@@ -49,9 +49,10 @@
     </section>
     <section>
       <h2>5. Publish a NodeBook</h2>
-      <label>NodeBook JSON<input id="nodebook-file" type="file" accept="application/json,.json"></label>
+      <label>Saved workspace ID<input id="publication-workspace" placeholder="Ab12Cd34Ef56"></label>
+      <label>Publication title<input id="publication-title" placeholder="Week 3 — belt drive"></label>
       <label>Publication mode<select id="mode"><option value="viewer">Read-only viewer</option><option value="editor">Editor</option></select></label>
-      <p class="muted">This NodeBook is published with the course’s complete pinned catalogue set.</p>
+      <p class="muted">Hub copies the workspace’s exact graph, catalogue pins, and complete compiled report into an immutable publication.</p>
       <button id="publish" type="button">Publish NodeBook</button>
       <p id="publication-link"></p>
     </section>
@@ -138,15 +139,14 @@
     } catch (error) { status(error.message, true); }
   };
   $('publish').onclick = async () => {
-    const file = $('nodebook-file').files[0];
+    const workspaceId = $('publication-workspace').value.trim(), title = $('publication-title').value.trim();
     if (!token()) return status('Enter the administrator token first.', true);
     if (!course) return status('Select or create a course first.', true);
-    if (!file) return status('Choose a NodeBook JSON file.', true);
-    if (course.catalogues.length === 0) return status('Add at least one catalogue revision to the course first.', true);
-    try { const document = JSON.parse(await file.text()); if (!document || typeof document.title !== 'string') throw new Error('The NodeBook file must contain a title.');
-      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title: document.title, mode: $('mode').value, document, catalogues: course.catalogues, courses: [course.slug] }) });
+    if (!workspaceId || !title) return status('Enter the saved workspace ID and publication title.', true);
+    try {
+      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title, mode: $('mode').value, workspaceId, courses: [course.slug] }) });
       const link = new URL(`/p/${created.id}`, window.location.origin).href; $('publication-link').replaceChildren(); const anchor = document.createElement('a'); anchor.href = link; anchor.textContent = link; $('publication-link').append('Published: ', anchor);
-      await loadCourse(course.slug); status(`Published ${document.title}.`);
+      await loadCourse(course.slug); status(`Published ${title}.`);
     } catch (error) { status(error.message, true); }
   };
 </script>
