@@ -29,6 +29,7 @@ use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tower_http::{
+    compression::CompressionLayer,
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
@@ -38,7 +39,8 @@ const PROTOCOL_VERSION: u8 = 1;
 const ADMIN_TOKEN_HEADER: &str = "x-joveworks-admin-token";
 const COURSE_TOKEN_HEADER: &str = "x-joveworks-course-token";
 const WORKSPACE_TOKEN_HEADER: &str = "x-joveworks-workspace-token";
-const MAX_REQUEST_BYTES: usize = 1_048_576;
+const MAX_COMPILED_NOTEBOOK_BYTES: usize = 1_048_576;
+const MAX_REQUEST_BYTES: usize = 3 * 1_048_576;
 const REQUESTS_PER_MINUTE: u32 = 600;
 
 #[derive(Clone)]
@@ -209,8 +211,7 @@ struct PublicationInput {
     title: String,
     #[serde(default = "viewer_mode")]
     mode: PublicationMode,
-    document: Value,
-    catalogues: Vec<CatalogueRef>,
+    workspace_id: String,
     #[serde(default)]
     courses: Vec<String>,
 }
@@ -239,9 +240,11 @@ struct CreatedPublication {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceInput {
     title: String,
     document: Value,
+    compiled_notebook: Value,
     #[serde(default)]
     course_slug: Option<String>,
     #[serde(default)]
@@ -336,6 +339,10 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/admin/catalogues", get(list_admin_catalogues))
         .route("/api/v1/publications", post(create_publication))
         .route("/api/v1/publications/{id}", get(get_publication))
+        .route(
+            "/api/v1/publications/{id}/notebook",
+            get(get_publication_notebook),
+        )
         .route("/api/v1/workspaces", post(create_workspace))
         .route(
             "/api/v1/workspaces/{id}/shares",
@@ -348,9 +355,11 @@ fn app(state: AppState) -> Router {
                 .delete(delete_workspace),
         )
         .route("/api/v1/shares/{id}", get(get_shared_workspace))
+        .route("/api/v1/shares/{id}/notebook", get(get_shared_notebook))
         .route("/s/{id}", get(share_link))
         .route("/p/{id}", get(publication_link))
         .layer(TraceLayer::new_for_http())
+        .layer(CompressionLayer::new())
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(rate_state, rate_limit))
         // Same-origin hosting is the normal deployment. This permissive layer
@@ -441,6 +450,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         5,
         "course_catalogues",
         include_str!("../migrations/0005_course_catalogues.sql"),
+    ),
+    (
+        6,
+        "compiled_notebooks",
+        include_str!("../migrations/0006_compiled_notebooks.sql"),
     ),
 ];
 
@@ -935,13 +949,29 @@ async fn create_publication(
 ) -> Result<(StatusCode, Json<CreatedPublication>), ApiError> {
     require_admin(&headers, &state)?;
     valid_name(&input.title, "publication title")?;
-    validate_document(&input.document)?;
-    if input.catalogues.is_empty() {
+    valid_name(&input.workspace_id, "workspace id")?;
+    let source = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT document_json, catalogues_json, compiled_notebook_json FROM workspaces WHERE id = ? AND compiled_notebook_json IS NOT NULL",
+    )
+    .bind(&input.workspace_id)
+    .fetch_optional(&state.database)
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("the source workspace is missing or has no compiled NodeBook; save it again before publishing".into()))?;
+    let document = parse_json(&source.0)?;
+    validate_document(&document)?;
+    let catalogues: Vec<CatalogueRef> = serde_json::from_str(&source.1).map_err(|_| {
+        ApiError::Database(sqlx::Error::Protocol(
+            "stored workspace catalogue refs are invalid".into(),
+        ))
+    })?;
+    let compiled = parse_json(&source.2)?;
+    validate_compiled_notebook(&compiled, true)?;
+    if catalogues.is_empty() {
         return Err(ApiError::BadRequest(
             "a publication must pin at least one catalogue".into(),
         ));
     }
-    for catalogue in &input.catalogues {
+    for catalogue in &catalogues {
         let actual = sqlx::query_scalar::<_, String>(
             "SELECT hash FROM catalogues WHERE id = ? AND version = ?",
         )
@@ -977,12 +1007,13 @@ async fn create_publication(
         }
     }
     let id = next_publication_id();
-    sqlx::query("INSERT INTO publications (id, title, mode, document_json, catalogues_json) VALUES (?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO publications (id, title, mode, document_json, catalogues_json, compiled_notebook_json) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(&input.title)
         .bind(mode_name(input.mode))
-        .bind(json_text(input.document)?)
-        .bind(json_text(serde_json::to_value(&input.catalogues).expect("catalogue refs serialize"))?)
+        .bind(&source.0)
+        .bind(&source.1)
+        .bind(&source.2)
         .execute(&mut *transaction)
         .await?;
     for course in &input.courses {
@@ -1004,8 +1035,9 @@ async fn create_publication(
 
 async fn get_publication(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Publication>, ApiError> {
+) -> Result<Response, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String)>(
         "SELECT title, mode, document_json, catalogues_json, published_at FROM publications WHERE id = ?",
     )
@@ -1013,7 +1045,7 @@ async fn get_publication(
     .fetch_optional(&state.database)
     .await?
     .ok_or(ApiError::NotFound)?;
-    Ok(Json(Publication {
+    let publication = Publication {
         protocol_version: PROTOCOL_VERSION,
         id,
         title: row.0,
@@ -1025,7 +1057,28 @@ async fn get_publication(
             ))
         })?,
         published_at: row.4,
-    }))
+    };
+    cached_json(
+        &headers,
+        serde_json::to_value(publication).expect("publication serializes"),
+        true,
+    )
+}
+
+async fn get_publication_notebook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let text = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT compiled_notebook_json FROM publications WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.database)
+    .await?
+    .flatten()
+    .ok_or(ApiError::NotFound)?;
+    cached_json(&headers, parse_json(&text)?, true)
 }
 
 /// Create a mutable student-owned graph. The public workspace id is safe to
@@ -1036,8 +1089,10 @@ async fn create_workspace(
 ) -> Result<(StatusCode, Json<CreatedWorkspace>), ApiError> {
     valid_name(&input.title, "workspace title")?;
     validate_document(&input.document)?;
+    validate_compiled_notebook(&input.compiled_notebook, false)?;
     let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
+    let compiled = json_text(input.compiled_notebook)?;
 
     // A collision is extremely unlikely, but the primary key remains the
     // authority and lets us safely retry rather than relying on probability.
@@ -1046,7 +1101,7 @@ async fn create_workspace(
         let edit_token = next_workspace_token();
         let token_hash = sha256(&edit_token);
         let result = sqlx::query(
-            "INSERT INTO workspaces (id, edit_token_hash, title, document_json, course_slug, catalogues_json) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO workspaces (id, edit_token_hash, title, document_json, course_slug, catalogues_json, compiled_notebook_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&token_hash)
@@ -1054,6 +1109,7 @@ async fn create_workspace(
         .bind(&document)
         .bind(&course_slug)
         .bind(&catalogues)
+        .bind(&compiled)
         .execute(&state.database)
         .await;
         match result {
@@ -1077,28 +1133,25 @@ async fn get_workspace(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
-    let token = workspace_token(&headers)?;
-    let row = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
-        "SELECT edit_token_hash, title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
+    require_workspace_owner(&headers, &state, &id).await?;
+    let row = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
+        "SELECT title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.database)
     .await?
     .ok_or(ApiError::NotFound)?;
-    if row.0 != sha256(token) {
-        return Err(ApiError::Unauthorized);
-    }
     Ok(Json(WorkspaceDocument {
         id,
-        title: row.1,
-        document: parse_json(&row.2)?,
-        course_slug: row.3,
-        catalogues: serde_json::from_str(&row.4).map_err(|_| {
+        title: row.0,
+        document: parse_json(&row.1)?,
+        course_slug: row.2,
+        catalogues: serde_json::from_str(&row.3).map_err(|_| {
             ApiError::Database(sqlx::Error::Protocol(
                 "stored workspace catalogue refs are invalid".into(),
             ))
         })?,
-        updated_at: row.5,
+        updated_at: row.4,
     }))
 }
 
@@ -1110,33 +1163,26 @@ async fn replace_workspace(
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
     valid_name(&input.title, "workspace title")?;
     validate_document(&input.document)?;
-    let token = workspace_token(&headers)?;
+    validate_compiled_notebook(&input.compiled_notebook, false)?;
+    require_workspace_owner(&headers, &state, &id).await?;
     let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
+    let compiled = json_text(input.compiled_notebook)?;
     let result = sqlx::query(
         "UPDATE workspaces
-         SET title = ?, document_json = ?, course_slug = ?, catalogues_json = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ? AND edit_token_hash = ?",
+         SET title = ?, document_json = ?, course_slug = ?, catalogues_json = ?, compiled_notebook_json = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?",
     )
     .bind(&input.title)
     .bind(&document)
     .bind(&course_slug)
     .bind(&catalogues)
+    .bind(&compiled)
     .bind(&id)
-    .bind(sha256(token))
     .execute(&state.database)
     .await?;
     if result.rows_affected() == 0 {
-        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM workspaces WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&state.database)
-            .await?
-            .is_some();
-        return Err(if exists {
-            ApiError::Unauthorized
-        } else {
-            ApiError::NotFound
-        });
+        return Err(ApiError::NotFound);
     }
     let updated_at = sqlx::query_scalar("SELECT updated_at FROM workspaces WHERE id = ?")
         .bind(&id)
@@ -1211,25 +1257,15 @@ async fn delete_workspace(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let token = workspace_token(&headers)?;
-    let result = sqlx::query("DELETE FROM workspaces WHERE id = ? AND edit_token_hash = ?")
+    require_workspace_owner(&headers, &state, &id).await?;
+    let result = sqlx::query("DELETE FROM workspaces WHERE id = ?")
         .bind(&id)
-        .bind(sha256(token))
         .execute(&state.database)
         .await?;
     if result.rows_affected() != 0 {
         return Ok(StatusCode::NO_CONTENT);
     }
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM workspaces WHERE id = ?")
-        .bind(&id)
-        .fetch_optional(&state.database)
-        .await?
-        .is_some();
-    Err(if exists {
-        ApiError::Unauthorized
-    } else {
-        ApiError::NotFound
-    })
+    Err(ApiError::NotFound)
 }
 
 async fn create_workspace_share(
@@ -1237,20 +1273,11 @@ async fn create_workspace_share(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<CreatedShare>), ApiError> {
-    let token = workspace_token(&headers)?;
+    require_workspace_owner(&headers, &state, &id).await?;
     let public_url = state
         .public_url
         .as_deref()
         .ok_or_else(|| ApiError::BadRequest("student sharing needs JOVEWORKS_PUBLIC_URL".into()))?;
-    let hash =
-        sqlx::query_scalar::<_, String>("SELECT edit_token_hash FROM workspaces WHERE id = ?")
-            .bind(&id)
-            .fetch_optional(&state.database)
-            .await?
-            .ok_or(ApiError::NotFound)?;
-    if hash != sha256(token) {
-        return Err(ApiError::Unauthorized);
-    }
     if let Some(existing) = sqlx::query_scalar::<_, String>(
         "SELECT id FROM workspace_shares WHERE workspace_id = ? ORDER BY created_at LIMIT 1",
     )
@@ -1317,6 +1344,17 @@ async fn get_shared_workspace(
     }))
 }
 
+async fn get_shared_notebook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let text = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT w.compiled_notebook_json FROM workspaces w JOIN workspace_shares s ON s.workspace_id = w.id WHERE s.id = ?",
+    ).bind(id).fetch_optional(&state.database).await?.flatten().ok_or(ApiError::NotFound)?;
+    cached_json(&headers, parse_json(&text)?, false)
+}
+
 async fn share_link(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1329,17 +1367,18 @@ async fn share_link(
         ));
     };
     Ok(Redirect::temporary(&format!(
-        "{}?hub={}&share={}",
+        "{}/s/{}{}",
         editor_url.trim_end_matches('/'),
-        url_component(public_url.trim_end_matches('/')),
-        url_component(&id)
+        url_component(&id),
+        if public_url.trim_end_matches('/') == editor_url.trim_end_matches('/') {
+            String::new()
+        } else {
+            format!("?hub={}", url_component(public_url.trim_end_matches('/')))
+        }
     )))
 }
 
-/// The human-facing, intentionally short publication URL. It will become the
-/// NodeBook-viewer route once the editor consumes Hub's API. Until then, it
-/// still resolves to the immutable publication JSON rather than an encoded
-/// document URL.
+/// The human-facing short link redirects to the frontend's matching SPA route.
 async fn publication_link(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1350,10 +1389,14 @@ async fn publication_link(
         return Ok(Redirect::temporary(&format!("/api/v1/publications/{id}")));
     };
     Ok(Redirect::temporary(&format!(
-        "{}?hub={}&publication={}",
+        "{}/p/{}{}",
         editor_url.trim_end_matches('/'),
-        url_component(public_url.trim_end_matches('/')),
         url_component(&id),
+        if public_url.trim_end_matches('/') == editor_url.trim_end_matches('/') {
+            String::new()
+        } else {
+            format!("?hub={}", url_component(public_url.trim_end_matches('/')))
+        },
     )))
 }
 
@@ -1386,6 +1429,26 @@ fn workspace_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or(ApiError::Unauthorized)
 }
 
+/** The replaceable ownership boundary: handlers do not know how credentials are stored. */
+async fn require_workspace_owner(
+    headers: &HeaderMap,
+    state: &AppState,
+    id: &str,
+) -> Result<(), ApiError> {
+    let token = workspace_token(headers)?;
+    let expected =
+        sqlx::query_scalar::<_, String>("SELECT edit_token_hash FROM workspaces WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.database)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    if expected == sha256(token) {
+        Ok(())
+    } else {
+        Err(ApiError::Unauthorized)
+    }
+}
+
 fn valid_name(value: &str, field: &str) -> Result<(), ApiError> {
     if value.trim().is_empty() || value.len() > 200 {
         Err(ApiError::BadRequest(format!(
@@ -1411,6 +1474,111 @@ fn validate_document(document: &Value) -> Result<(), ApiError> {
         ));
     }
     Ok(())
+}
+
+fn validate_compiled_notebook(notebook: &Value, require_complete: bool) -> Result<(), ApiError> {
+    let text =
+        serde_json::to_vec(notebook).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    if text.len() > MAX_COMPILED_NOTEBOOK_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "compiled NodeBook is {} bytes; the uncompressed limit is {} bytes",
+            text.len(),
+            MAX_COMPILED_NOTEBOOK_BYTES
+        )));
+    }
+    let root = notebook
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("compiledNotebook must be an object".into()))?;
+    if root.get("schemaVersion").and_then(Value::as_i64) != Some(1)
+        || root.get("title").and_then(Value::as_str).is_none()
+        || !root.get("marks").is_some_and(Value::is_array)
+        || !root.get("axisReadouts").is_some_and(Value::is_array)
+    {
+        return Err(ApiError::BadRequest(
+            "compiledNotebook is not a version 1 compiled report".into(),
+        ));
+    }
+    let sections = root
+        .get("sections")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::BadRequest("compiledNotebook.sections must be an array".into()))?;
+    let mut outputs = 0usize;
+    for section in sections {
+        let section = section.as_object().ok_or_else(|| {
+            ApiError::BadRequest("compiledNotebook section must be an object".into())
+        })?;
+        let entries = section
+            .get("outputs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                ApiError::BadRequest("compiledNotebook section outputs must be an array".into())
+            })?;
+        outputs += entries.len();
+        for output in entries {
+            let output = output.as_object().ok_or_else(|| {
+                ApiError::BadRequest("compiledNotebook output must be an object".into())
+            })?;
+            if output.get("kind").and_then(Value::as_str) == Some("equation") {
+                return Err(ApiError::BadRequest(
+                    "compiled NodeBooks must omit equation outputs".into(),
+                ));
+            }
+            if require_complete && output.get("available").and_then(Value::as_bool) != Some(true) {
+                return Err(ApiError::BadRequest(
+                    "an instructor publication requires every report output to be available".into(),
+                ));
+            }
+        }
+    }
+    if require_complete && outputs == 0 {
+        return Err(ApiError::BadRequest(
+            "an instructor publication requires at least one report output".into(),
+        ));
+    }
+    fn forbidden(value: &Value) -> bool {
+        match value {
+            Value::Array(values) => values.iter().any(forbidden),
+            Value::Object(object) => object.iter().any(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "expression" | "catalogues" | "edges" | "position"
+                ) || forbidden(value)
+            }),
+            _ => false,
+        }
+    }
+    if forbidden(notebook) {
+        return Err(ApiError::BadRequest("compiled NodeBooks cannot contain expressions, catalogues, graph edges, or canvas positions".into()));
+    }
+    Ok(())
+}
+
+fn cached_json(headers: &HeaderMap, value: Value, immutable: bool) -> Result<Response, ApiError> {
+    let text =
+        serde_json::to_string(&value).map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let etag = format!("\"{}\"", sha256(&text));
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        == Some(etag.as_str());
+    let mut response = if not_modified {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        Json(value).into_response()
+    };
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).expect("hash is a header"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(if immutable {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        }),
+    );
+    Ok(response)
 }
 
 fn json_text(value: Value) -> Result<String, ApiError> {
@@ -1704,6 +1872,18 @@ mod tests {
             .unwrap()
     }
 
+    fn compiled_notebook(available: bool) -> Value {
+        json!({
+            "schemaVersion": 1,
+            "title": "Compiled test report",
+            "sections": [{
+                "id": "results", "title": "Results", "sliders": [],
+                "outputs": [{ "id": "answer", "kind": "print", "label": "Answer", "available": available, "result": { "kind": "print", "series": { "axes": [], "data": [42] }, "unit": { "symbol": "mm" } } }]
+            }],
+            "marks": [], "axisReadouts": []
+        })
+    }
+
     async fn json_body(response: Response) -> Value {
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         serde_json::from_slice(&bytes).unwrap()
@@ -1758,14 +1938,39 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
+        let workspace_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/workspaces")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "title": "Published source",
+                            "document": { "schemaVersion": 1, "id": "published-nodebook" },
+                            "compiledNotebook": compiled_notebook(true),
+                            "courseSlug": "machine-design-2026",
+                            "catalogues": [reference.clone()]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(workspace_response.status(), StatusCode::CREATED);
+        let workspace_created = json_body(workspace_response).await;
+        let workspace_id = workspace_created["id"].as_str().unwrap().to_owned();
+        let workspace_token = workspace_created["editToken"].as_str().unwrap().to_owned();
+
         let response = app
             .clone()
             .oneshot(json_request(
                 "/api/v1/publications",
                 json!({
                     "title": "A published NodeBook",
-                    "document": { "schemaVersion": 1, "id": "published-nodebook" },
-                    "catalogues": [reference.clone()],
+                    "workspaceId": workspace_id,
                     "courses": ["machine-design-2026"]
                 }),
             ))
@@ -1773,6 +1978,95 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let publication_id = json_body(response).await["id"].as_str().unwrap().to_owned();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/publications/{publication_id}/notebook"))
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        let publication_etag = response.headers()[header::ETAG].clone();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/publications/{publication_id}/notebook"))
+                    .header(header::IF_NONE_MATCH, publication_etag)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}/shares"))
+                    .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let share_id = json_body(response).await["id"].as_str().unwrap().to_owned();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/shares/{share_id}/notebook"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(json_body(response).await["title"], "Compiled test report");
+
+        let mut changed = compiled_notebook(true);
+        changed["title"] = json!("Changed student report");
+        let response = app.clone().oneshot(Request::builder().method("PUT")
+            .uri(format!("/api/v1/workspaces/{workspace_id}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
+            .body(Body::from(json!({ "title": "Changed", "document": { "schemaVersion": 1, "id": "changed" }, "compiledNotebook": changed, "courseSlug": "machine-design-2026", "catalogues": [reference.clone()] }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/shares/{share_id}/notebook"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await["title"], "Changed student report");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/publications/{publication_id}/notebook"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json_body(response).await["title"], "Compiled test report");
 
         let response = app
             .clone()
@@ -1867,7 +2161,7 @@ mod tests {
         assert_eq!(
             response.headers()[header::LOCATION],
             format!(
-                "https://editor.example.edu?hub=https%3A%2F%2Fhub.example.edu&publication={publication_id}"
+                "https://editor.example.edu/p/{publication_id}?hub=https%3A%2F%2Fhub.example.edu"
             )
         );
 
@@ -1954,7 +2248,7 @@ mod tests {
                     .uri("/api/v1/workspaces")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({ "title": "Belt study", "document": document }).to_string(),
+                        json!({ "title": "Belt study", "document": document, "compiledNotebook": compiled_notebook(false) }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -1990,7 +2284,7 @@ mod tests {
                     .uri(format!("/api/v1/workspaces/{id}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        json!({ "title": "Belt study v2", "document": replacement }).to_string(),
+                        json!({ "title": "Belt study v2", "document": replacement, "compiledNotebook": compiled_notebook(false) }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -2007,7 +2301,7 @@ mod tests {
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(WORKSPACE_TOKEN_HEADER, token)
                     .body(Body::from(
-                        json!({ "title": "Belt study v2", "document": replacement }).to_string(),
+                        json!({ "title": "Belt study v2", "document": replacement, "compiledNotebook": compiled_notebook(false) }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -2143,5 +2437,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn compiled_reports_enforce_publication_completeness_privacy_and_size() {
+        let incomplete = compiled_notebook(false);
+        assert!(validate_compiled_notebook(&incomplete, false).is_ok());
+        assert!(validate_compiled_notebook(&incomplete, true).is_err());
+
+        let mut leaked = compiled_notebook(true);
+        leaked["sections"][0]["outputs"][0]["result"]["expression"] = json!("invented secret");
+        assert!(validate_compiled_notebook(&leaked, false).is_err());
+
+        let mut oversized = compiled_notebook(true);
+        oversized["sections"][0]["prose"] = json!("x".repeat(MAX_COMPILED_NOTEBOOK_BYTES));
+        let error = validate_compiled_notebook(&oversized, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("uncompressed limit"));
     }
 }

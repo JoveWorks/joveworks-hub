@@ -299,17 +299,15 @@ Requires the admin header. The request is:
 {
   "title":"Week 3 — belt drive",
   "mode":"viewer",
-  "document":{"schemaVersion":1,"id":"belt-week-3"},
-  "catalogues":[{"id":"public-example","version":1,"hash":"<catalogue hash>"}],
+  "workspaceId":"Ab12Cd34Ef56",
   "courses":["machine-design-2026"]
 }
 ```
 
 `mode` is optional and defaults to `viewer`; the only values are `viewer` and
-`editor`. `document` must be a JSON object with `schemaVersion` and string
-`id`. At least one catalogue reference is required, every referenced revision
-must exist, and every supplied hash must match. Every course slug must already
-exist. Validation failures return `400`.
+`editor`. Hub copies the workspace's exact document, catalogue pins, and
+compiled report in one transaction. The stored report must be complete and
+every course slug must already exist. Validation failures return `400`.
 
 Success is `201 Created` with a newly generated random 12-character `id` and
 relative resource link:
@@ -336,11 +334,16 @@ Returns `200 OK` with the immutable publication snapshot:
 
 Publication records are immutable and are not deleted or updated by v1.
 
+### `GET /api/v1/publications/{id}/notebook`
+
+Returns only the immutable, presentation-ready compiled report. It contains no
+graph, expressions, catalogue content, edges, or canvas positions.
+
 ### `GET /p/{id}`
 
-Returns `307 Temporary Redirect` with `Location: /api/v1/publications/{id}`.
-It currently redirects to the JSON resource; it is reserved as the stable
-human-facing publication link and is not yet a browser viewer route.
+Returns `307 Temporary Redirect` to the frontend's matching `/p/{id}` route.
+When Hub and JoveWorks use different origins, the redirect adds the Hub origin
+as the `hub` query parameter.
 
 ## Student workspaces
 
@@ -354,7 +357,7 @@ it never places it in a link or sends it while loading.
 No administrator token is required. The request is:
 
 ```json
-{"title":"Belt study","document":{"schemaVersion":1,"id":"belt-study"}}
+{"title":"Belt study","document":{"schemaVersion":1,"id":"belt-study"},"compiledNotebook":{"schemaVersion":1,"title":"Belt study","sections":[],"marks":[],"axisReadouts":[]}}
 ```
 
 When a student starts from course material, the editor also sends its course
@@ -362,7 +365,8 @@ slug and immutable catalogue pins. Hub verifies both before storing them, then
 returns them on every load so another browser can fetch the exact revisions.
 
 `title` is required (1–200 characters); `document` must be a JSON object with
-`schemaVersion` and `id`. Success is `201 Created`:
+`schemaVersion` and `id`. The compiled report may contain unavailable outputs,
+but is limited to 1 MiB uncompressed. Success is `201 Created`:
 
 ```json
 {"id":"Ab12Cd34Ef56","editToken":"<32-character secret>"}
@@ -378,7 +382,8 @@ Course material is shared through immutable publications, not workspaces.
 
 ### `PUT /api/v1/workspaces/{id}`
 
-Uses the same `title`/`document` request shape as create and requires:
+Uses the same atomic `title`/`document`/`compiledNotebook` request shape as
+create and requires:
 
 ```text
 X-JoveWorks-Workspace-Token: <editToken>
@@ -449,14 +454,11 @@ Cache-Control: private, max-age=0
 The ETag is the quoted SHA-256 catalogue hash. `max-age=0` asks clients to
 revalidate before reuse and `private` prevents shared/proxy caches from storing
 catalogue responses. This is especially important for restricted catalogues.
-The current server does not evaluate `If-None-Match` and does not return
-`304 Not Modified`; a conditional request still receives the normal `200`
-response (after the course-token check). Clients may use the ETag for
-integrity comparison, but should not depend on conditional GET behavior yet.
+Catalogue requests do not currently evaluate `If-None-Match`; clients use the
+ETag for integrity comparison.
 
-Publication, course index/manifest, discovery, and redirect responses do not currently set
-an explicit `Cache-Control` or `ETag` header. A client or deployment proxy
-must not invent long-lived caching for mutable course manifests. For
-immutable publication and public catalogue resources, deployments may add a
-carefully scoped cache policy, but must preserve restricted-catalogue access
-controls and the resource's immutable URL semantics.
+Publication source and compiled-report responses use immutable one-year cache
+headers and ETags, including `304 Not Modified`. Shared workspace reports use
+ETags with `Cache-Control: no-cache`, so each reuse revalidates current state.
+JSON responses are gzip-compressed when the client accepts gzip. Course
+manifests remain mutable and must not receive long-lived cache policy.
