@@ -1,18 +1,18 @@
-# From Hub MVP to course sharing
+# From Hub MVP to cloud sharing
 
 This plan turns the present prototype into a service students can use to open
-course material through a short link. Its order matters: publishable,
-versioned course content comes before accounts and student cloud storage.
+cloud material through a short link. Its order matters: publishable,
+versioned cloud content comes before accounts and student cloud storage.
 
 ## Current baseline
 
 Hub stores immutable catalogue versions and published NodeBook snapshots in
 SQLite. It has a small JSON API, random publication IDs, an administrator
 token for writes, and a separate shared token for restricted catalogue reads.
-The editor can connect to a named course, download a publication and the exact
+The editor can connect to a named cloud, download a publication and the exact
 catalogue revisions it pins, and open it as a local document.
 
-The limits are intentional: `/p/{id}` currently redirects to JSON; course
+The limits are intentional: `/p/{id}` currently redirects to JSON; cloud
 selection requires knowing a slug; there is no author publishing flow, account
 system, server-side student work, or HTTPS deployment path yet.
 
@@ -22,14 +22,14 @@ Goal: an instructor can rely on a published revision remaining reproducible.
 
 1. Move Hub's `CREATE TABLE IF NOT EXISTS` setup into numbered SQL migrations,
    applied on startup and tested against a fresh database and an upgrade.
-2. Specify API v1 as a versioned, checked-in contract: discovery, course
+2. Specify API v1 as a versioned, checked-in contract: discovery, cloud
    index, publication, catalogue, error shape, ETag semantics, and cache
    policy.
 3. Strengthen publication validation. A publish request must parse its graph
    and catalogues with the same schema rules as the editor, verify every graph
    formula reference against its pinned catalogue, and reject missing or
    mismatched references.
-4. Add end-to-end tests covering course creation, catalogue upload, publication
+4. Add end-to-end tests covering cloud creation, catalogue upload, publication
    creation, short-link lookup, a restricted-catalogue refusal, and a
    successful authenticated open.
 
@@ -42,27 +42,27 @@ revision.
 Goal: publishing does not require hand-writing HTTP requests.
 
 1. Build an instructor-only command-line client (`hubctl` or Hub subcommands)
-   that uploads a validated catalogue revision, creates/updates a course, and
+   that uploads a validated catalogue revision, creates/updates a cloud, and
    publishes a NodeBook from a `.jove.json` file.
 2. Print the immutable short publication URL on success and support a dry run
    that shows the catalogue versions and hashes which will be pinned.
 3. Keep real R&M catalogue files in their private catalogue repository. The
    public Hub repository contains only generic code, fixtures with invented
    formulae, and documentation.
-4. Record simple publication metadata: author, course, timestamp, title, and
+4. Record simple publication metadata: author, cloud, timestamp, title, and
    an optional explanatory note. Do not add mutable editing of a published
    revision; correcting material creates a new publication.
 
-Done when: an instructor can publish a course NodeBook with one command and
+Done when: an instructor can publish a cloud NodeBook with one command and
 paste the returned link into the LMS.
 
-## Phase 3 — Link-based course viewer
+## Phase 3 — Link-based cloud viewer
 
 Goal: a student can click a short link and read the intended NodeBook on any
 device without first configuring the editor.
 
-1. Add `GET /api/v1/courses` so an editor that knows only a Hub address can
-   show available courses; remove the course-slug requirement from the normal
+1. Add `GET /api/v1/clouds` so an editor that knows only a Hub address can
+   show available clouds; remove the cloud-slug requirement from the normal
    student connection flow.
 2. Teach the editor's read-only NodeBook viewer to fetch a Hub publication,
    download its pinned catalogues, and render the generic document rather than
@@ -80,17 +80,17 @@ device without first configuring the editor.
 Done when: opening `https://hub.example/p/abc123` renders a mobile-friendly,
 read-only NodeBook and its interactive exposed sliders.
 
-## Phase 4 — Real course access control
+## Phase 4 — Real cloud access control
 
-Goal: restricted course content is available to enrolled students, not merely
+Goal: restricted cloud content is available to enrolled students, not merely
 to anyone who receives a shared secret.
 
 1. Decide the identity source before implementation: institutional OIDC, LMS
-   launch/LTI, or a short-term managed course-login service. Do not build a
+   launch/LTI, or a short-term managed cloud-login service. Do not build a
    bespoke password-account system unless that decision explicitly calls for
    it.
-2. Introduce users, course memberships, and roles (`instructor`, `student`).
-   Replace the browser-held course token with short-lived authenticated access.
+2. Introduce users, cloud memberships, and roles (`instructor`, `student`).
+   Replace the browser-held cloud token with short-lived authenticated access.
 3. Retain the current shared token only as an explicit transition mode for
    local/private testing, with a documented expiry/rotation plan.
 4. Restrict CORS to the deployed JoveWorks origin; retain HTTPS everywhere;
@@ -98,16 +98,16 @@ to anyone who receives a shared secret.
    reads.
 
 Done when: an unenrolled browser cannot retrieve a restricted catalogue, while
-an enrolled student can open a course link without manually copying a secret.
+an enrolled student can open a cloud link without manually copying a secret.
 
 ## Phase 5 — Student storage and submissions
 
-Goal: students can keep and hand in their own work without altering course
+Goal: students can keep and hand in their own work without altering cloud
 material.
 
 1. Add private document records owned by a user, with immutable revisions and
    an optimistic version token for save-conflict detection.
-2. **Fork** copies a published NodeBook into private student storage; course
+2. **Fork** copies a published NodeBook into private student storage; cloud
    publications remain immutable and never become shared edit buffers.
 3. Add submissions as a reference to one chosen private revision, timestamped
    and locked for the instructor's review policy. A submission is not a live
@@ -116,7 +116,7 @@ material.
    remains available as a portable fallback.
 
 Done when: a student can fork a lab, save revisions across devices, and submit
-one reproducible revision to the course.
+one reproducible revision to the cloud.
 
 ## Phase 6 — Deployment and operations
 
@@ -140,11 +140,11 @@ observed without depending on one developer's local machine.
 ## Decisions to make before Phase 4
 
 - Which institution/LMS identity system is available?
-- Is the first real course deployed on a university-controlled hostname, a
+- Is the first real cloud deployed on a university-controlled hostname, a
   personal server, or another hosting provider?
 - What is the required submission workflow: export-only, deadline-based Hub
   submissions, or LMS upload of a Hub revision link?
-- Is any material public, or should every course and publication require
+- Is any material public, or should every cloud and publication require
   enrolment from the start?
 
 ## Explicit non-goals for this sequence

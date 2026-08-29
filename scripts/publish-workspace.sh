@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
-  echo "Usage: $0 WORKSPACE_ID TITLE MODE [COURSE ...]" >&2
+  echo "Usage: $0 WORKSPACE_ID TITLE MODE [CLOUD ...]" >&2
   exit 2
 fi
 : "${JOVEWORKS_ADMIN_TOKEN:?Set JOVEWORKS_ADMIN_TOKEN}"
@@ -15,9 +15,9 @@ hub_url=${JOVEWORKS_HUB_URL:-http://127.0.0.1:8080}
 
 payload=$(python3 -c '
 import json, sys
-workspace, title, mode, *courses = sys.argv[1:]
+workspace, title, mode, *clouds = sys.argv[1:]
 if mode not in ("viewer", "editor"): raise SystemExit("MODE must be viewer or editor")
-print(json.dumps({"workspaceId": workspace, "title": title, "mode": mode, "courses": courses}, separators=(",", ":")))
+print(json.dumps({"workspaceId": workspace, "title": title, "mode": mode, "clouds": clouds}, separators=(",", ":")))
 ' "$workspace_id" "$title" "$mode" "$@")
 
 curl --silent --show-error --fail-with-body \

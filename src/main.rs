@@ -37,7 +37,7 @@ use tracing::{info, warn};
 
 const PROTOCOL_VERSION: u8 = 1;
 const ADMIN_TOKEN_HEADER: &str = "x-joveworks-admin-token";
-const COURSE_TOKEN_HEADER: &str = "x-joveworks-course-token";
+const CLOUD_TOKEN_HEADER: &str = "x-joveworks-cloud-token";
 const WORKSPACE_TOKEN_HEADER: &str = "x-joveworks-workspace-token";
 const MAX_COMPILED_NOTEBOOK_BYTES: usize = 1_048_576;
 const MAX_REQUEST_BYTES: usize = 3 * 1_048_576;
@@ -49,7 +49,7 @@ struct AppState {
     admin_token: Arc<str>,
     /// Restricted catalogues can never accidentally become public. Setting this
     /// is required before one may be downloaded.
-    course_token: Option<Arc<str>>,
+    cloud_token: Option<Arc<str>>,
     public_url: Option<Arc<str>>,
     editor_url: Option<Arc<str>>,
     rate_window: Arc<Mutex<RateWindow>>,
@@ -70,7 +70,7 @@ enum ApiError {
     InUse,
     #[error("the requested resource was not found")]
     NotFound,
-    #[error("this resource requires course access")]
+    #[error("this resource requires cloud access")]
     Unauthorized,
     #[error("storage failed")]
     Database(#[from] sqlx::Error),
@@ -102,7 +102,7 @@ struct Discovery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CourseInput {
+struct CloudInput {
     title: String,
     #[serde(default)]
     theme: Option<Value>,
@@ -110,28 +110,28 @@ struct CourseInput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CourseManifest {
+struct CloudManifest {
     protocol_version: u8,
     slug: String,
     title: String,
     theme: Option<Value>,
     publications: Vec<PublicationSummary>,
-    /// Immutable catalogue revisions explicitly pinned to this course.
+    /// Immutable catalogue revisions explicitly pinned to this cloud.
     catalogues: Vec<CatalogueRef>,
-    /// Full immutable documents, included when a course is opened.
+    /// Full immutable documents, included when a cloud is opened.
     catalogue_contents: Vec<CatalogueDocument>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CourseIndex {
+struct CloudIndex {
     protocol_version: u8,
-    courses: Vec<CourseSummary>,
+    clouds: Vec<CloudSummary>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CourseSummary {
+struct CloudSummary {
     slug: String,
     title: String,
     theme: Option<Value>,
@@ -139,9 +139,9 @@ struct CourseSummary {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CourseCatalogues {
+struct CloudCatalogues {
     protocol_version: u8,
-    course_slug: String,
+    cloud_slug: String,
     catalogues: Vec<CatalogueRef>,
     catalogue_contents: Vec<CatalogueDocument>,
 }
@@ -171,7 +171,7 @@ struct CatalogueIndex {
 }
 
 #[derive(Deserialize)]
-struct CourseCataloguesInput {
+struct CloudCataloguesInput {
     catalogues: Vec<CatalogueRef>,
 }
 
@@ -213,7 +213,7 @@ struct PublicationInput {
     mode: PublicationMode,
     workspace_id: String,
     #[serde(default)]
-    courses: Vec<String>,
+    clouds: Vec<String>,
 }
 
 fn viewer_mode() -> PublicationMode {
@@ -246,7 +246,7 @@ struct WorkspaceInput {
     document: Value,
     compiled_notebook: Value,
     #[serde(default)]
-    course_slug: Option<String>,
+    cloud_slug: Option<String>,
     #[serde(default)]
     catalogues: Vec<CatalogueRef>,
 }
@@ -270,7 +270,7 @@ struct WorkspaceDocument {
     id: String,
     title: String,
     document: Value,
-    course_slug: Option<String>,
+    cloud_slug: Option<String>,
     catalogues: Vec<CatalogueRef>,
     updated_at: String,
 }
@@ -298,7 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState {
         database,
         admin_token: Arc::from(admin_token),
-        course_token: env::var("JOVEWORKS_COURSE_TOKEN").ok().map(Arc::from),
+        cloud_token: env::var("JOVEWORKS_CLOUD_TOKEN").ok().map(Arc::from),
         public_url: env::var("JOVEWORKS_PUBLIC_URL").ok().map(Arc::from),
         editor_url: env::var("JOVEWORKS_EDITOR_URL").ok().map(Arc::from),
         rate_window: Arc::new(Mutex::new(RateWindow {
@@ -318,12 +318,12 @@ fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/admin", get(admin))
         .route("/.well-known/joveworks", get(discovery))
-        .route("/api/v1/courses", get(list_courses))
+        .route("/api/v1/clouds", get(list_clouds))
         .route(
-            "/api/v1/courses/{slug}/catalogues",
-            get(list_course_catalogues).put(put_course_catalogues),
+            "/api/v1/clouds/{slug}/catalogues",
+            get(list_cloud_catalogues).put(put_cloud_catalogues),
         )
-        .route("/api/v1/courses/{slug}", get(get_course).post(put_course))
+        .route("/api/v1/clouds/{slug}", get(get_cloud).post(put_cloud))
         .route(
             "/api/v1/catalogues/{id}/{version}",
             get(get_catalogue).post(put_catalogue),
@@ -438,8 +438,8 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         3,
-        "workspace_course_pins",
-        include_str!("../migrations/0003_workspace_course_pins.sql"),
+        "workspace_cloud_pins",
+        include_str!("../migrations/0003_workspace_cloud_pins.sql"),
     ),
     (
         4,
@@ -448,8 +448,8 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         5,
-        "course_catalogues",
-        include_str!("../migrations/0005_course_catalogues.sql"),
+        "cloud_catalogues",
+        include_str!("../migrations/0005_cloud_catalogues.sql"),
     ),
     (
         6,
@@ -475,18 +475,18 @@ async fn discovery() -> Json<Discovery> {
     })
 }
 
-async fn put_course(
+async fn put_cloud(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
-    Json(input): Json<CourseInput>,
+    Json(input): Json<CloudInput>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&headers, &state)?;
-    valid_name(&slug, "course slug")?;
-    valid_name(&input.title, "course title")?;
+    valid_name(&slug, "cloud slug")?;
+    valid_name(&input.title, "cloud title")?;
     let theme = input.theme.map(json_text).transpose()?;
     sqlx::query(
-        "INSERT INTO courses (slug, title, theme_json) VALUES (?, ?, ?)
+        "INSERT INTO clouds (slug, title, theme_json) VALUES (?, ?, ?)
          ON CONFLICT(slug) DO UPDATE SET title = excluded.title, theme_json = excluded.theme_json, updated_at = CURRENT_TIMESTAMP",
     )
     .bind(slug)
@@ -497,35 +497,35 @@ async fn put_course(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_courses(State(state): State<AppState>) -> Result<Json<CourseIndex>, ApiError> {
+async fn list_clouds(State(state): State<AppState>) -> Result<Json<CloudIndex>, ApiError> {
     let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
-        "SELECT slug, title, theme_json FROM courses ORDER BY title COLLATE NOCASE, slug",
+        "SELECT slug, title, theme_json FROM clouds ORDER BY title COLLATE NOCASE, slug",
     )
     .fetch_all(&state.database)
     .await?;
-    let courses = rows
+    let clouds = rows
         .into_iter()
         .map(|(slug, title, theme)| {
-            Ok(CourseSummary {
+            Ok(CloudSummary {
                 slug,
                 title,
                 theme: theme.map(|text| parse_json(&text)).transpose()?,
             })
         })
         .collect::<Result<_, ApiError>>()?;
-    Ok(Json(CourseIndex {
+    Ok(Json(CloudIndex {
         protocol_version: PROTOCOL_VERSION,
-        courses,
+        clouds,
     }))
 }
 
-async fn get_course(
+async fn get_cloud(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
-) -> Result<Json<CourseManifest>, ApiError> {
-    let course = sqlx::query_as::<_, (String, Option<String>)>(
-        "SELECT title, theme_json FROM courses WHERE slug = ?",
+) -> Result<Json<CloudManifest>, ApiError> {
+    let cloud = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT title, theme_json FROM clouds WHERE slug = ?",
     )
     .bind(&slug)
     .fetch_optional(&state.database)
@@ -533,8 +533,8 @@ async fn get_course(
     .ok_or(ApiError::NotFound)?;
     let rows = sqlx::query_as::<_, (String, String, String, String)>(
         "SELECT p.id, p.title, p.mode, p.published_at
-         FROM publications p JOIN course_publications cp ON cp.publication_id = p.id
-         WHERE cp.course_slug = ? ORDER BY p.published_at DESC",
+         FROM publications p JOIN cloud_publications cp ON cp.publication_id = p.id
+         WHERE cp.cloud_slug = ? ORDER BY p.published_at DESC",
     )
     .bind(&slug)
     .fetch_all(&state.database)
@@ -550,26 +550,26 @@ async fn get_course(
             })
         })
         .collect::<Result<_, ApiError>>()?;
-    let catalogues = course_catalogues(&state.database, &slug).await?;
-    let catalogue_contents = course_catalogue_contents(&state, &headers, &slug).await?;
-    Ok(Json(CourseManifest {
+    let catalogues = cloud_catalogues(&state.database, &slug).await?;
+    let catalogue_contents = cloud_catalogue_contents(&state, &headers, &slug).await?;
+    Ok(Json(CloudManifest {
         protocol_version: PROTOCOL_VERSION,
         slug,
-        title: course.0,
-        theme: course.1.map(|text| parse_json(&text)).transpose()?,
+        title: cloud.0,
+        theme: cloud.1.map(|text| parse_json(&text)).transpose()?,
         publications,
         catalogues,
         catalogue_contents,
     }))
 }
 
-/// Lists the immutable catalogue revisions explicitly pinned to this course.
-async fn list_course_catalogues(
+/// Lists the immutable catalogue revisions explicitly pinned to this cloud.
+async fn list_cloud_catalogues(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
-) -> Result<Json<CourseCatalogues>, ApiError> {
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
+) -> Result<Json<CloudCatalogues>, ApiError> {
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM clouds WHERE slug = ?")
         .bind(&slug)
         .fetch_optional(&state.database)
         .await?
@@ -577,25 +577,25 @@ async fn list_course_catalogues(
     if !exists {
         return Err(ApiError::NotFound);
     }
-    Ok(Json(CourseCatalogues {
+    Ok(Json(CloudCatalogues {
         protocol_version: PROTOCOL_VERSION,
-        catalogues: course_catalogues(&state.database, &slug).await?,
-        catalogue_contents: course_catalogue_contents(&state, &headers, &slug).await?,
-        course_slug: slug,
+        catalogues: cloud_catalogues(&state.database, &slug).await?,
+        catalogue_contents: cloud_catalogue_contents(&state, &headers, &slug).await?,
+        cloud_slug: slug,
     }))
 }
 
-async fn put_course_catalogues(
+async fn put_cloud_catalogues(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(slug): Path<String>,
-    Json(input): Json<CourseCataloguesInput>,
+    Json(input): Json<CloudCataloguesInput>,
 ) -> Result<StatusCode, ApiError> {
     require_admin(&headers, &state)?;
-    valid_name(&slug, "course slug")?;
+    valid_name(&slug, "cloud slug")?;
     validate_catalogue_refs(&state.database, &input.catalogues).await?;
     let mut transaction = state.database.begin().await?;
-    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
+    let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM clouds WHERE slug = ?")
         .bind(&slug)
         .fetch_optional(&mut *transaction)
         .await?
@@ -616,8 +616,8 @@ async fn put_course_catalogues(
         .collect::<HashSet<_>>();
     let publication_pins = sqlx::query_as::<_, (String, String)>(
         "SELECT p.id, p.catalogues_json
-         FROM publications p JOIN course_publications cp ON cp.publication_id = p.id
-         WHERE cp.course_slug = ?",
+         FROM publications p JOIN cloud_publications cp ON cp.publication_id = p.id
+         WHERE cp.cloud_slug = ?",
     )
     .bind(&slug)
     .fetch_all(&mut *transaction)
@@ -637,13 +637,13 @@ async fn put_course_catalogues(
             }
         }
     }
-    sqlx::query("DELETE FROM course_catalogues WHERE course_slug = ?")
+    sqlx::query("DELETE FROM cloud_catalogues WHERE cloud_slug = ?")
         .bind(&slug)
         .execute(&mut *transaction)
         .await?;
     for catalogue in input.catalogues {
         sqlx::query(
-            "INSERT INTO course_catalogues (course_slug, catalogue_id, catalogue_version) VALUES (?, ?, ?)",
+            "INSERT INTO cloud_catalogues (cloud_slug, catalogue_id, catalogue_version) VALUES (?, ?, ?)",
         )
         .bind(&slug)
         .bind(catalogue.id)
@@ -655,17 +655,17 @@ async fn put_course_catalogues(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn course_catalogues(
+async fn cloud_catalogues(
     database: &SqlitePool,
-    course_slug: &str,
+    cloud_slug: &str,
 ) -> Result<Vec<CatalogueRef>, ApiError> {
     let rows = sqlx::query_as::<_, (String, i64, String)>(
         "SELECT c.id, c.version, c.hash
-         FROM catalogues c JOIN course_catalogues cc
+         FROM catalogues c JOIN cloud_catalogues cc
            ON cc.catalogue_id = c.id AND cc.catalogue_version = c.version
-         WHERE cc.course_slug = ? ORDER BY c.id, c.version",
+         WHERE cc.cloud_slug = ? ORDER BY c.id, c.version",
     )
-    .bind(course_slug)
+    .bind(cloud_slug)
     .fetch_all(database)
     .await?;
 
@@ -675,18 +675,18 @@ async fn course_catalogues(
         .collect())
 }
 
-async fn course_catalogue_contents(
+async fn cloud_catalogue_contents(
     state: &AppState,
     headers: &HeaderMap,
-    course_slug: &str,
+    cloud_slug: &str,
 ) -> Result<Vec<CatalogueDocument>, ApiError> {
     let rows = sqlx::query_as::<_, (String, i64, String, bool, String)>(
         "SELECT c.id, c.version, c.hash, c.restricted, c.content_json
-         FROM catalogues c JOIN course_catalogues cc
+         FROM catalogues c JOIN cloud_catalogues cc
            ON cc.catalogue_id = c.id AND cc.catalogue_version = c.version
-         WHERE cc.course_slug = ? ORDER BY c.id, c.version",
+         WHERE cc.cloud_slug = ? ORDER BY c.id, c.version",
     )
-    .bind(course_slug)
+    .bind(cloud_slug)
     .fetch_all(&state.database)
     .await?;
     if rows.iter().any(|row| row.3) {
@@ -695,7 +695,7 @@ async fn course_catalogue_contents(
             .and_then(|value| value.to_str().ok())
             == Some(state.admin_token.as_ref());
         if !is_admin {
-            require_course_access(headers, state)?;
+            require_cloud_access(headers, state)?;
         }
     }
     rows.into_iter()
@@ -782,8 +782,8 @@ async fn delete_admin_catalogue(
             "catalogue version must be positive".into(),
         ));
     }
-    let course_use = sqlx::query_scalar::<_, i64>(
-        "SELECT EXISTS(SELECT 1 FROM course_catalogues WHERE catalogue_id = ? AND catalogue_version = ?)",
+    let cloud_use = sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM cloud_catalogues WHERE catalogue_id = ? AND catalogue_version = ?)",
     )
     .bind(&id)
     .bind(version)
@@ -811,7 +811,7 @@ async fn delete_admin_catalogue(
     .bind(version)
     .fetch_one(&state.database)
     .await?;
-    if course_use != 0 || publication_use != 0 || workspace_use != 0 {
+    if cloud_use != 0 || publication_use != 0 || workspace_use != 0 {
         return Err(ApiError::InUse);
     }
     let result = sqlx::query("DELETE FROM catalogues WHERE id = ? AND version = ?")
@@ -928,7 +928,7 @@ async fn get_catalogue(
     .await?
     .ok_or(ApiError::NotFound)?;
     if restricted {
-        require_course_access(&headers, &state)?;
+        require_cloud_access(&headers, &state)?;
     }
     let mut response = Json(parse_json(&content)?).into_response();
     response.headers_mut().insert(
@@ -993,16 +993,16 @@ async fn create_publication(
         }
     }
     let mut transaction = state.database.begin().await?;
-    for course in &input.courses {
-        valid_name(course, "course slug")?;
-        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
-            .bind(course)
+    for cloud in &input.clouds {
+        valid_name(cloud, "cloud slug")?;
+        let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM clouds WHERE slug = ?")
+            .bind(cloud)
             .fetch_optional(&mut *transaction)
             .await?
             .is_some();
         if !exists {
             return Err(ApiError::BadRequest(format!(
-                "course '{course}' does not exist"
+                "cloud '{cloud}' does not exist"
             )));
         }
     }
@@ -1016,9 +1016,9 @@ async fn create_publication(
         .bind(&source.2)
         .execute(&mut *transaction)
         .await?;
-    for course in &input.courses {
-        sqlx::query("INSERT INTO course_publications (course_slug, publication_id) VALUES (?, ?)")
-            .bind(course)
+    for cloud in &input.clouds {
+        sqlx::query("INSERT INTO cloud_publications (cloud_slug, publication_id) VALUES (?, ?)")
+            .bind(cloud)
             .bind(&id)
             .execute(&mut *transaction)
             .await?;
@@ -1090,7 +1090,7 @@ async fn create_workspace(
     valid_name(&input.title, "workspace title")?;
     validate_document(&input.document)?;
     validate_compiled_notebook(&input.compiled_notebook, false)?;
-    let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
+    let (cloud_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
     let compiled = json_text(input.compiled_notebook)?;
 
@@ -1101,13 +1101,13 @@ async fn create_workspace(
         let edit_token = next_workspace_token();
         let token_hash = sha256(&edit_token);
         let result = sqlx::query(
-            "INSERT INTO workspaces (id, edit_token_hash, title, document_json, course_slug, catalogues_json, compiled_notebook_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO workspaces (id, edit_token_hash, title, document_json, cloud_slug, catalogues_json, compiled_notebook_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&token_hash)
         .bind(&input.title)
         .bind(&document)
-        .bind(&course_slug)
+        .bind(&cloud_slug)
         .bind(&catalogues)
         .bind(&compiled)
         .execute(&state.database)
@@ -1135,7 +1135,7 @@ async fn get_workspace(
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
     require_workspace_owner(&headers, &state, &id).await?;
     let row = sqlx::query_as::<_, (String, String, Option<String>, String, String)>(
-        "SELECT title, document_json, course_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
+        "SELECT title, document_json, cloud_slug, catalogues_json, updated_at FROM workspaces WHERE id = ?",
     )
     .bind(&id)
     .fetch_optional(&state.database)
@@ -1145,7 +1145,7 @@ async fn get_workspace(
         id,
         title: row.0,
         document: parse_json(&row.1)?,
-        course_slug: row.2,
+        cloud_slug: row.2,
         catalogues: serde_json::from_str(&row.3).map_err(|_| {
             ApiError::Database(sqlx::Error::Protocol(
                 "stored workspace catalogue refs are invalid".into(),
@@ -1165,17 +1165,17 @@ async fn replace_workspace(
     validate_document(&input.document)?;
     validate_compiled_notebook(&input.compiled_notebook, false)?;
     require_workspace_owner(&headers, &state, &id).await?;
-    let (course_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
+    let (cloud_slug, catalogues) = validate_workspace_binding(&state, &input).await?;
     let document = json_text(input.document)?;
     let compiled = json_text(input.compiled_notebook)?;
     let result = sqlx::query(
         "UPDATE workspaces
-         SET title = ?, document_json = ?, course_slug = ?, catalogues_json = ?, compiled_notebook_json = ?, updated_at = CURRENT_TIMESTAMP
+         SET title = ?, document_json = ?, cloud_slug = ?, catalogues_json = ?, compiled_notebook_json = ?, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?",
     )
     .bind(&input.title)
     .bind(&document)
-    .bind(&course_slug)
+    .bind(&cloud_slug)
     .bind(&catalogues)
     .bind(&compiled)
     .bind(&id)
@@ -1192,7 +1192,7 @@ async fn replace_workspace(
         id,
         title: input.title,
         document: parse_json(&document)?,
-        course_slug,
+        cloud_slug,
         catalogues: serde_json::from_str(&catalogues).map_err(|_| {
             ApiError::Database(sqlx::Error::Protocol(
                 "workspace catalogue refs did not serialize".into(),
@@ -1206,23 +1206,23 @@ async fn validate_workspace_binding(
     state: &AppState,
     input: &WorkspaceInput,
 ) -> Result<(Option<String>, String), ApiError> {
-    let Some(course_slug) = input.course_slug.as_ref() else {
+    let Some(cloud_slug) = input.cloud_slug.as_ref() else {
         if input.catalogues.is_empty() {
             return Ok((None, "[]".into()));
         }
         return Err(ApiError::BadRequest(
-            "workspace catalogue pins require a course slug".into(),
+            "workspace catalogue pins require a cloud slug".into(),
         ));
     };
-    valid_name(course_slug, "course slug")?;
-    let course_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM courses WHERE slug = ?")
-        .bind(course_slug)
+    valid_name(cloud_slug, "cloud slug")?;
+    let cloud_exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM clouds WHERE slug = ?")
+        .bind(cloud_slug)
         .fetch_optional(&state.database)
         .await?
         .is_some();
-    if !course_exists {
+    if !cloud_exists {
         return Err(ApiError::BadRequest(format!(
-            "course '{course_slug}' does not exist"
+            "cloud '{cloud_slug}' does not exist"
         )));
     }
     for catalogue in &input.catalogues {
@@ -1247,7 +1247,7 @@ async fn validate_workspace_binding(
         }
     }
     Ok((
-        Some(course_slug.clone()),
+        Some(cloud_slug.clone()),
         json_text(serde_json::to_value(&input.catalogues).expect("catalogue refs serialize"))?,
     ))
 }
@@ -1328,13 +1328,13 @@ async fn get_shared_workspace(
     Path(id): Path<String>,
 ) -> Result<Json<WorkspaceDocument>, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
-        "SELECT w.id, w.title, w.document_json, w.course_slug, w.catalogues_json, w.updated_at FROM workspaces w JOIN workspace_shares s ON s.workspace_id = w.id WHERE s.id = ?",
+        "SELECT w.id, w.title, w.document_json, w.cloud_slug, w.catalogues_json, w.updated_at FROM workspaces w JOIN workspace_shares s ON s.workspace_id = w.id WHERE s.id = ?",
     ).bind(&id).fetch_optional(&state.database).await?.ok_or(ApiError::NotFound)?;
     Ok(Json(WorkspaceDocument {
         id: row.0,
         title: row.1,
         document: parse_json(&row.2)?,
-        course_slug: row.3,
+        cloud_slug: row.3,
         catalogues: serde_json::from_str(&row.4).map_err(|_| {
             ApiError::Database(sqlx::Error::Protocol(
                 "stored workspace catalogue refs are invalid".into(),
@@ -1411,11 +1411,11 @@ fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> 
     }
 }
 
-fn require_course_access(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
+fn require_cloud_access(headers: &HeaderMap, state: &AppState) -> Result<(), ApiError> {
     let given = headers
-        .get(COURSE_TOKEN_HEADER)
+        .get(CLOUD_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
-    match state.course_token.as_deref() {
+    match state.cloud_token.as_deref() {
         Some(expected) if given == Some(expected) => Ok(()),
         _ => Err(ApiError::Unauthorized),
     }
@@ -1656,7 +1656,7 @@ mod tests {
         app(AppState {
             database,
             admin_token: Arc::from("admin-test-token"),
-            course_token: Some(Arc::from("course-test-token")),
+            cloud_token: Some(Arc::from("cloud-test-token")),
             public_url: Some(Arc::from("https://hub.example.edu")),
             editor_url: Some(Arc::from("https://editor.example.edu")),
             rate_window: Arc::new(Mutex::new(RateWindow {
@@ -1686,9 +1686,9 @@ mod tests {
         assert_eq!(applied, 1);
         for table in [
             "catalogues",
-            "courses",
+            "clouds",
             "publications",
-            "course_publications",
+            "cloud_publications",
         ] {
             let exists: i64 = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?)",
@@ -1722,7 +1722,7 @@ mod tests {
         assert!(
             std::str::from_utf8(&body)
                 .unwrap()
-                .contains("Course publishing")
+                .contains("Cloud publishing")
         );
     }
 
@@ -1745,14 +1745,14 @@ mod tests {
             );
             INSERT INTO catalogues (id, version, hash, restricted, content_json)
             VALUES ('existing', 1, 'hash', 0, '{}');
-            CREATE TABLE courses (
+            CREATE TABLE clouds (
                 slug TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 theme_json TEXT,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
-            INSERT INTO courses (slug, title, theme_json)
-            VALUES ('legacy-course', 'Legacy course', '{"theme":"blue"}');
+            INSERT INTO clouds (slug, title, theme_json)
+            VALUES ('legacy-cloud', 'Legacy cloud', '{"theme":"blue"}');
             CREATE TABLE publications (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -1764,13 +1764,13 @@ mod tests {
             INSERT INTO publications (id, title, mode, document_json, catalogues_json)
             VALUES ('legacy-publication', 'Legacy publication', 'viewer', '{}',
                     '[{"id":"existing","version":1,"hash":"hash"}]');
-            CREATE TABLE course_publications (
-                course_slug TEXT NOT NULL REFERENCES courses(slug),
+            CREATE TABLE cloud_publications (
+                cloud_slug TEXT NOT NULL REFERENCES clouds(slug),
                 publication_id TEXT NOT NULL REFERENCES publications(id),
-                PRIMARY KEY (course_slug, publication_id)
+                PRIMARY KEY (cloud_slug, publication_id)
             );
-            INSERT INTO course_publications (course_slug, publication_id)
-            VALUES ('legacy-course', 'legacy-publication');"#,
+            INSERT INTO cloud_publications (cloud_slug, publication_id)
+            VALUES ('legacy-cloud', 'legacy-publication');"#,
         )
         .execute(&database)
         .await
@@ -1786,13 +1786,13 @@ mod tests {
         .unwrap();
         assert_eq!(existing, 1);
 
-        let preserved_course: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM courses WHERE slug = 'legacy-course' AND title = 'Legacy course'",
+        let preserved_cloud: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM clouds WHERE slug = 'legacy-cloud' AND title = 'Legacy cloud'",
         )
         .fetch_one(&database)
         .await
         .unwrap();
-        assert_eq!(preserved_course, 1);
+        assert_eq!(preserved_cloud, 1);
 
         let preserved_publication: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM publications WHERE id = 'legacy-publication' AND title = 'Legacy publication'",
@@ -1803,8 +1803,8 @@ mod tests {
         assert_eq!(preserved_publication, 1);
 
         let preserved_link: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM course_publications
-             WHERE course_slug = 'legacy-course' AND publication_id = 'legacy-publication'",
+            "SELECT COUNT(*) FROM cloud_publications
+             WHERE cloud_slug = 'legacy-cloud' AND publication_id = 'legacy-publication'",
         )
         .fetch_one(&database)
         .await
@@ -1812,8 +1812,8 @@ mod tests {
         assert_eq!(preserved_link, 1);
 
         let preserved_catalogue_pin: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM course_catalogues
-             WHERE course_slug = 'legacy-course' AND catalogue_id = 'existing' AND catalogue_version = 1",
+            "SELECT COUNT(*) FROM cloud_catalogues
+             WHERE cloud_slug = 'legacy-cloud' AND catalogue_id = 'existing' AND catalogue_version = 1",
         )
         .fetch_one(&database)
         .await
@@ -1822,12 +1822,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn course_index_lists_course_selection_metadata_in_title_order() {
+    async fn cloud_index_lists_cloud_selection_metadata_in_title_order() {
         let app = test_app().await;
         for (slug, title, theme) in [
-            ("zeta", "Zeta course", None),
-            ("alpha", "Alpha course", Some(json!({ "accent": "blue" }))),
-            ("algebra", "algebra course", None),
+            ("zeta", "Zeta cloud", None),
+            ("alpha", "Alpha cloud", Some(json!({ "accent": "blue" }))),
+            ("algebra", "algebra cloud", None),
         ] {
             let mut body = json!({ "title": title });
             if let Some(theme) = theme {
@@ -1835,7 +1835,7 @@ mod tests {
             }
             let response = app
                 .clone()
-                .oneshot(json_request(&format!("/api/v1/courses/{slug}"), body))
+                .oneshot(json_request(&format!("/api/v1/clouds/{slug}"), body))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1845,7 +1845,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/courses")
+                    .uri("/api/v1/clouds")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1855,11 +1855,11 @@ mod tests {
         assert!(response.headers().get(header::CACHE_CONTROL).is_none());
         let body = json_body(response).await;
         assert_eq!(body["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(body["courses"][0]["slug"], "algebra");
-        assert_eq!(body["courses"][1]["slug"], "alpha");
-        assert_eq!(body["courses"][1]["theme"]["accent"], "blue");
-        assert_eq!(body["courses"][2]["slug"], "zeta");
-        assert_eq!(body["courses"][0].get("publications"), None);
+        assert_eq!(body["clouds"][0]["slug"], "algebra");
+        assert_eq!(body["clouds"][1]["slug"], "alpha");
+        assert_eq!(body["clouds"][1]["theme"]["accent"], "blue");
+        assert_eq!(body["clouds"][2]["slug"], "zeta");
+        assert_eq!(body["clouds"][0].get("publications"), None);
     }
 
     fn json_request(uri: &str, body: Value) -> Request<Body> {
@@ -1914,7 +1914,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(json_request(
-                "/api/v1/courses/machine-design-2026",
+                "/api/v1/clouds/machine-design-2026",
                 json!({ "title": "Machine design 2026" }),
             ))
             .await
@@ -1926,7 +1926,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .uri("/api/v1/clouds/machine-design-2026/catalogues")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(ADMIN_TOKEN_HEADER, "admin-test-token")
                     .body(Body::from(
@@ -1950,7 +1950,7 @@ mod tests {
                             "title": "Published source",
                             "document": { "schemaVersion": 1, "id": "published-nodebook" },
                             "compiledNotebook": compiled_notebook(true),
-                            "courseSlug": "machine-design-2026",
+                            "cloudSlug": "machine-design-2026",
                             "catalogues": [reference.clone()]
                         })
                         .to_string(),
@@ -1971,7 +1971,7 @@ mod tests {
                 json!({
                     "title": "A published NodeBook",
                     "workspaceId": workspace_id,
-                    "courses": ["machine-design-2026"]
+                    "clouds": ["machine-design-2026"]
                 }),
             ))
             .await
@@ -2043,7 +2043,7 @@ mod tests {
             .uri(format!("/api/v1/workspaces/{workspace_id}"))
             .header(header::CONTENT_TYPE, "application/json")
             .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
-            .body(Body::from(json!({ "title": "Changed", "document": { "schemaVersion": 1, "id": "changed" }, "compiledNotebook": changed, "courseSlug": "machine-design-2026", "catalogues": [reference.clone()] }).to_string())).unwrap()).await.unwrap();
+            .body(Body::from(json!({ "title": "Changed", "document": { "schemaVersion": 1, "id": "changed" }, "compiledNotebook": changed, "cloudSlug": "machine-design-2026", "catalogues": [reference.clone()] }).to_string())).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = app
             .clone()
@@ -2073,7 +2073,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .uri("/api/v1/clouds/machine-design-2026/catalogues")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(ADMIN_TOKEN_HEADER, "admin-test-token")
                     .body(Body::from(json!({ "catalogues": [] }).to_string()))
@@ -2101,22 +2101,22 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/courses/machine-design-2026")
+                    .uri("/api/v1/clouds/machine-design-2026")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let course = json_body(response).await;
-        assert_eq!(course["catalogues"], json!([reference.clone()]));
-        assert_eq!(course["catalogueContents"][0]["content"], catalogue);
+        let cloud = json_body(response).await;
+        assert_eq!(cloud["catalogues"], json!([reference.clone()]));
+        assert_eq!(cloud["catalogueContents"][0]["content"], catalogue);
 
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/courses/machine-design-2026/catalogues")
+                    .uri("/api/v1/clouds/machine-design-2026/catalogues")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2124,7 +2124,7 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let catalogues = json_body(response).await;
-        assert_eq!(catalogues["courseSlug"], "machine-design-2026");
+        assert_eq!(catalogues["cloudSlug"], "machine-design-2026");
         assert_eq!(catalogues["catalogues"], json!([reference]));
         assert_eq!(
             catalogues["catalogueContents"][0]["content"]["id"],
@@ -2341,7 +2341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restricted_catalogue_requires_the_course_token() {
+    async fn restricted_catalogue_requires_the_cloud_token() {
         let app = test_app().await;
         let catalogue = json!({
             "schemaVersion": 1,
@@ -2364,8 +2364,8 @@ mod tests {
         let response = app
             .clone()
             .oneshot(json_request(
-                "/api/v1/courses/restricted-course",
-                json!({ "title": "Restricted course" }),
+                "/api/v1/clouds/restricted-cloud",
+                json!({ "title": "Restricted cloud" }),
             ))
             .await
             .unwrap();
@@ -2375,7 +2375,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("PUT")
-                    .uri("/api/v1/courses/restricted-course/catalogues")
+                    .uri("/api/v1/clouds/restricted-cloud/catalogues")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(ADMIN_TOKEN_HEADER, "admin-test-token")
                     .body(Body::from(json!({ "catalogues": [reference] }).to_string()))
@@ -2389,7 +2389,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/courses/restricted-course")
+                    .uri("/api/v1/clouds/restricted-cloud")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2401,8 +2401,8 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/v1/courses/restricted-course")
-                    .header(COURSE_TOKEN_HEADER, "course-test-token")
+                    .uri("/api/v1/clouds/restricted-cloud")
+                    .header(CLOUD_TOKEN_HEADER, "cloud-test-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -2430,7 +2430,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/catalogues/restricted-example/1")
-                    .header(COURSE_TOKEN_HEADER, "course-test-token")
+                    .header(CLOUD_TOKEN_HEADER, "cloud-test-token")
                     .body(Body::empty())
                     .unwrap(),
             )

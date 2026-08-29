@@ -18,8 +18,8 @@ if [[ -f .env ]]; then
 fi
 
 : "${JOVEWORKS_ADMIN_TOKEN:?Copy .env.example to .env and set JOVEWORKS_ADMIN_TOKEN.}"
-if [[ -z "${JOVEWORKS_COURSE_TOKEN:-}" ]]; then
-  echo "JOVEWORKS_COURSE_TOKEN is unset: restricted catalogues will remain unavailable." >&2
+if [[ -z "${JOVEWORKS_CLOUD_TOKEN:-}" ]]; then
+  echo "JOVEWORKS_CLOUD_TOKEN is unset: restricted catalogues will remain unavailable." >&2
 fi
 
 # Unlike `cargo run`'s development default, this listens on every IPv4

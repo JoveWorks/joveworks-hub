@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS catalogues (
     PRIMARY KEY (id, version)
 );
 
-CREATE TABLE IF NOT EXISTS courses (
+CREATE TABLE IF NOT EXISTS clouds (
     slug TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     theme_json TEXT,
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS publications (
     published_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS course_publications (
-    course_slug TEXT NOT NULL REFERENCES courses(slug),
+CREATE TABLE IF NOT EXISTS cloud_publications (
+    cloud_slug TEXT NOT NULL REFERENCES clouds(slug),
     publication_id TEXT NOT NULL REFERENCES publications(id),
-    PRIMARY KEY (course_slug, publication_id)
+    PRIMARY KEY (cloud_slug, publication_id)
 );

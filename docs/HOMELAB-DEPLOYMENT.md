@@ -49,7 +49,7 @@ chmod 600 .env
 ```
 
 Put the first random value in `JOVEWORKS_ADMIN_TOKEN` and the second in
-`JOVEWORKS_COURSE_TOKEN`. Do not commit or publish `.env`. The prepared public
+`JOVEWORKS_CLOUD_TOKEN`. Do not commit or publish `.env`. The prepared public
 URL and host binding should remain:
 
 ```dotenv
@@ -62,7 +62,7 @@ JOVEWORKS_HOST_PORT=8083
 and specifically the **stable** build, not a nightly or preview deployment.
 `publication_link` (`src/main.rs` near line 1343) builds every `/p/{id}` short
 link by appending `?hub=…&publication=…` to this value verbatim, so whatever
-channel this origin serves is the channel every student who opens a course
+channel this origin serves is the channel every student who opens a cloud
 link lands on. Pointing it at nightly silently defeats a correctly deployed
 stable bundle elsewhere: the bundle is right, but the links sent to students
 still open the wrong copy of the app, mid-semester, on every push to `main`.
@@ -153,7 +153,7 @@ should name `jovehub.thomasvanriel.com` and show no trust warning.
 
 Finally, confirm the configured `JOVEWORKS_EDITOR_URL` actually serves the
 stable build: open that origin in a browser and check its version badge reads
-`stable vX.Y.Z`. If it reads `nightly` instead, every short course link Hub
+`stable vX.Y.Z`. If it reads `nightly` instead, every short cloud link Hub
 generates will send students to the wrong channel even though Hub itself is
 healthy — fix `JOVEWORKS_EDITOR_URL` in `.env` and restart the container
 before going further.

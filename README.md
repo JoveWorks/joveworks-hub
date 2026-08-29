@@ -1,14 +1,14 @@
 # JoveWorks Hub
 
 JoveWorks Hub is a small, self-hosted backend for distributing immutable
-catalogue versions and NodeBook publications. Courses explicitly pin their
-catalogue revisions; opening a course includes the full pinned catalogues. A
+catalogue versions and NodeBook publications. Clouds explicitly pin their
+catalogue revisions; opening a cloud includes the full pinned catalogues. A
 publication has a random short identifier and retains its own historical pins.
 The graph itself never embeds formula bodies.
 
 This is an MVP distribution API, not yet student cloud storage or live
 collaboration. Writes require an administrator token. Restricted catalogues
-also require a separate course token; Hub refuses to serve them when that token
+also require a separate cloud token; Hub refuses to serve them when that token
 has not been configured.
 
 ## Run locally
@@ -17,7 +17,7 @@ Rust 1.94 or newer is required.
 
 ```sh
 export JOVEWORKS_ADMIN_TOKEN='a-local-admin-secret'
-export JOVEWORKS_COURSE_TOKEN='a-local-course-secret'
+export JOVEWORKS_CLOUD_TOKEN='a-local-cloud-secret'
 cargo run
 ```
 
@@ -32,7 +32,7 @@ curl http://127.0.0.1:8080/.well-known/joveworks
 ### Expose it on a local network
 
 For one-command network binding, copy `.env.example` to `.env`, set the admin
-token (and the course token when serving restricted catalogues), then run:
+token (and the cloud token when serving restricted catalogues), then run:
 
 ```sh
 ./scripts/run-network.sh
@@ -81,17 +81,17 @@ see [the homelab deployment guide](docs/HOMELAB-DEPLOYMENT.md).
 
 ## Admin console
 
-Open `https://your-hub.example/admin` to create courses, upload immutable
+Open `https://your-hub.example/admin` to create clouds, upload immutable
 catalogue revisions from JSON or YAML files, and publish NodeBooks without using
 the shell. Enter the
 administrator token for the current browser session; Hub never stores it and
 the console does not persist it in browser storage. Catalogue files and
 NodeBooks are read locally by the browser, then sent only to the same Hub.
 
-Use the catalogue-library checklist to attach immutable revisions to a course.
-The course’s complete pinned set is then used when publishing NodeBooks and is
-included in the course response. A revision needed by an already-published
-NodeBook cannot be removed from that course; publish a replacement NodeBook
+Use the catalogue-library checklist to attach immutable revisions to a cloud.
+The cloud’s complete pinned set is then used when publishing NodeBooks and is
+included in the cloud response. A revision needed by an already-published
+NodeBook cannot be removed from that cloud; publish a replacement NodeBook
 before retiring material.
 
 ## API v1
@@ -116,7 +116,7 @@ X-JoveWorks-Admin-Token: <JOVEWORKS_ADMIN_TOKEN>
 Restricted catalogue downloads additionally require:
 
 ```text
-X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
+X-JoveWorks-Cloud-Token: <JOVEWORKS_CLOUD_TOKEN>
 ```
 
 Student workspace reads/writes/deletes require a third, per-workspace token
@@ -126,10 +126,10 @@ returned once by `POST /api/v1/workspaces` (see below).
 | --- | --- |
 | `GET /healthz` | Container health probe (`204 No Content`). |
 | `GET /.well-known/joveworks` | Hub discovery and protocol version. |
-| `GET /api/v1/courses` | Discover available courses. |
-| `POST /api/v1/courses/{slug}` | Create or update a course. |
-| `GET /api/v1/courses/{slug}` | Course manifest and its publications. |
-| `GET`/`PUT /api/v1/courses/{slug}/catalogues` | Get full course catalogue bundle / replace its pinned revision set. |
+| `GET /api/v1/clouds` | Discover available clouds. |
+| `POST /api/v1/clouds/{slug}` | Create or update a cloud. |
+| `GET /api/v1/clouds/{slug}` | Cloud manifest and its publications. |
+| `GET`/`PUT /api/v1/clouds/{slug}/catalogues` | Get full cloud catalogue bundle / replace its pinned revision set. |
 | `GET /api/v1/admin/catalogues` | List catalogue revisions for the admin console. |
 | `POST /api/v1/admin/catalogues/{version}` | Upload a JSON/YAML catalogue file, id read from the document. |
 | `DELETE /api/v1/admin/catalogues/{id}/{version}` | Delete an unused catalogue revision. |
@@ -165,7 +165,7 @@ Publication request shape:
   "title": "Week 3 — belt drive",
   "mode": "viewer",
   "workspaceId": "<stored Hub workspace id>",
-  "courses": ["machine-design-2026"]
+  "clouds": ["machine-design-2026"]
 }
 ```
 
@@ -174,12 +174,12 @@ pins, and complete compiled report into a new immutable random 12-character
 publication ID. Incomplete student workspaces may be shared but cannot be
 promoted. Share `https://your-hub.example/p/{id}`.
 
-## Publish course material
+## Publish cloud material
 
-Create the course and upload its catalogue revision first:
+Create the cloud and upload its catalogue revision first:
 
 ```sh
-./scripts/create-course.sh machine-design-2026 "Machine design 2026"
+./scripts/create-cloud.sh machine-design-2026 "Machine design 2026"
 ```
 
 After saving the finished workspace from JoveWorks, promote it with:
@@ -191,7 +191,7 @@ After saving the finished workspace from JoveWorks, promote it with:
 Publishing never overwrites a catalogue revision. Every publication retains
 the graph, report, and exact catalogue hashes captured by that workspace save.
 
-## Course-material links
+## Cloud-material links
 
 Set `JOVEWORKS_PUBLIC_URL` to Hub's public HTTPS origin and
 `JOVEWORKS_EDITOR_URL` to the editor's public HTTPS origin. Hub then turns
@@ -207,5 +207,5 @@ current save and cannot be used to edit or delete it.
 - No accounts, submissions, or live collaboration yet.
 - No server-side formula evaluation.
 - No claim of DRM. A student who can evaluate a restricted catalogue receives
-  it in their browser. The course token is an MVP access gate, to be replaced
-  by proper course/identity integration before broad deployment.
+  it in their browser. The cloud token is an MVP access gate, to be replaced
+  by proper cloud/identity integration before broad deployment.

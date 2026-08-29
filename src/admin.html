@@ -19,20 +19,20 @@
 </head>
 <body>
 <main>
-  <header><div><p class="muted">JoveWorks Hub</p><h1>Course publishing</h1></div><p class="muted">The admin token stays only in this tab.</p></header>
-  <p id="status" class="status">Enter the administrator token, then load or create a course.</p>
+  <header><div><p class="muted">JoveWorks Hub</p><h1>Cloud publishing</h1></div><p class="muted">The admin token stays only in this tab.</p></header>
+  <p id="status" class="status">Enter the administrator token, then load or create a cloud.</p>
   <div class="grid">
     <section>
       <h2>1. Administrator access</h2>
       <label>Admin token<input id="token" type="password" autocomplete="current-password" placeholder="Paste the Hub administrator token"></label>
-      <button id="load-courses" type="button">Load courses</button>
+      <button id="load-clouds" type="button">Load clouds</button>
     </section>
     <section>
-      <h2>2. Create or select a course</h2>
-      <label>Existing course<select id="courses"><option value="">Load courses first</option></select></label>
-      <label>New course slug<input id="new-slug" placeholder="machine-design-2026"></label>
-      <label>New course title<input id="new-title" placeholder="Machine design 2026"></label>
-      <button id="save-course" type="button">Create or update course</button>
+      <h2>2. Create or select a cloud</h2>
+      <label>Existing cloud<select id="clouds"><option value="">Load clouds first</option></select></label>
+      <label>New cloud slug<input id="new-slug" placeholder="machine-design-2026"></label>
+      <label>New cloud title<input id="new-title" placeholder="Machine design 2026"></label>
+      <button id="save-cloud" type="button">Create or update cloud</button>
     </section>
     <section>
       <h2>3. Upload a catalogue revision</h2>
@@ -42,10 +42,10 @@
       <button id="upload-catalogue" type="button">Upload catalogue</button>
     </section>
     <section>
-      <h2>4. Course catalogues</h2>
-      <p class="muted">Tick a revision to include it in this course; untick and save to remove it. Every course download includes the full selected set.</p>
-      <div id="catalogues" class="list"><p class="muted">Select a course to manage its catalogue set.</p></div>
-      <button id="save-catalogues" type="button">Save course catalogues</button>
+      <h2>4. Cloud catalogues</h2>
+      <p class="muted">Tick a revision to include it in this cloud; untick and save to remove it. Every cloud download includes the full selected set.</p>
+      <div id="catalogues" class="list"><p class="muted">Select a cloud to manage its catalogue set.</p></div>
+      <button id="save-catalogues" type="button">Save cloud catalogues</button>
     </section>
     <section>
       <h2>5. Publish a NodeBook</h2>
@@ -57,14 +57,14 @@
       <p id="publication-link"></p>
     </section>
     <section class="wide">
-      <h2>Course material</h2>
-      <div id="publications" class="list"><p class="muted">Select a course to see publications.</p></div>
+      <h2>Cloud material</h2>
+      <div id="publications" class="list"><p class="muted">Select a cloud to see publications.</p></div>
     </section>
   </div>
 </main>
 <script>
   const $ = (id) => document.getElementById(id);
-  let course = undefined;
+  let cloud = undefined;
   let catalogueLibrary = [];
   const status = (message, error = false) => { const node = $('status'); node.textContent = message; node.className = `status${error ? ' error' : ''}`; };
   const token = () => $('token').value.trim();
@@ -78,17 +78,17 @@
   };
   const renderCatalogues = () => {
     const list = $('catalogues'); list.replaceChildren();
-    if (!course) { list.innerHTML = '<p class="muted">Select a course to manage its catalogue set.</p>'; return; }
+    if (!cloud) { list.innerHTML = '<p class="muted">Select a cloud to manage its catalogue set.</p>'; return; }
     if (catalogueLibrary.length === 0) { list.innerHTML = '<p class="muted">No catalogue revisions yet. Upload one first.</p>'; return; }
-    const attached = new Set(course.catalogues.map((ref) => `${ref.id}\n${ref.version}`));
+    const attached = new Set(cloud.catalogues.map((ref) => `${ref.id}\n${ref.version}`));
     for (const ref of catalogueLibrary) {
       const row = document.createElement('div'); row.className = 'item';
-      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = attached.has(`${ref.id}\n${ref.version}`); checkbox.setAttribute('aria-label', `Include ${ref.id} version ${ref.version} in this course`);
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `ref:${ref.id}:${ref.version}`; checkbox.checked = attached.has(`${ref.id}\n${ref.version}`); checkbox.setAttribute('aria-label', `Include ${ref.id} version ${ref.version} in this cloud`);
       const text = document.createElement('span'); text.textContent = `${ref.id} · version ${ref.version}`;
       const hash = document.createElement('small'); hash.textContent = `${ref.restricted ? 'restricted · ' : ''}${ref.hash.slice(0, 12)}`;
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Delete'; remove.disabled = attached.has(`${ref.id}\n${ref.version}`); remove.title = remove.disabled ? 'Remove this revision from the course before deleting it.' : 'Delete this unused catalogue revision from Hub.';
+      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Delete'; remove.disabled = attached.has(`${ref.id}\n${ref.version}`); remove.title = remove.disabled ? 'Remove this revision from the cloud before deleting it.' : 'Delete this unused catalogue revision from Hub.';
       remove.onclick = async () => {
-        if (!confirm(`Delete ${ref.id} version ${ref.version}? This only works when no course, publication, or workspace uses it.`)) return;
+        if (!confirm(`Delete ${ref.id} version ${ref.version}? This only works when no cloud, publication, or workspace uses it.`)) return;
         try { await request(`/api/v1/admin/catalogues/${encodeURIComponent(ref.id)}/${ref.version}`, { method: 'DELETE', headers: headers() });
           await loadCatalogueLibrary(); renderCatalogues(); status(`Deleted ${ref.id} version ${ref.version}.`);
         } catch (error) { status(error.message, true); }
@@ -96,30 +96,30 @@
       row.append(checkbox, text, hash, remove); list.append(row);
     }
   };
-  const renderCourse = () => {
+  const renderCloud = () => {
     $('publications').replaceChildren(); const list = $('publications');
-    if (!course) { list.innerHTML = '<p class="muted">Select a course to see publications.</p>'; renderCatalogues(); return; }
-    if (course.publications.length === 0) list.innerHTML = '<p class="muted">No NodeBooks have been published to this course yet.</p>';
-    for (const publication of course.publications) { const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title; const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`; row.append(meta); list.append(row); }
+    if (!cloud) { list.innerHTML = '<p class="muted">Select a cloud to see publications.</p>'; renderCatalogues(); return; }
+    if (cloud.publications.length === 0) list.innerHTML = '<p class="muted">No NodeBooks have been published to this cloud yet.</p>';
+    for (const publication of cloud.publications) { const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title; const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`; row.append(meta); list.append(row); }
     renderCatalogues();
   };
   const loadCatalogueLibrary = async () => { catalogueLibrary = (await request('/api/v1/admin/catalogues', { headers: headers() })).catalogues; };
-  const loadCourse = async (slug) => { course = await request(`/api/v1/courses/${encodeURIComponent(slug)}`, { headers: headers() }); renderCourse(); };
-  $('load-courses').onclick = async () => {
-    try { const [index] = await Promise.all([request('/api/v1/courses'), loadCatalogueLibrary()]); const select = $('courses'); select.replaceChildren();
-      if (index.courses.length === 0) select.add(new Option('No courses yet', ''));
-      for (const item of index.courses) select.add(new Option(item.title, item.slug));
-      if (index.courses[0]) { select.value = index.courses[0].slug; await loadCourse(select.value); }
-      status('Courses loaded.');
+  const loadCloud = async (slug) => { cloud = await request(`/api/v1/clouds/${encodeURIComponent(slug)}`, { headers: headers() }); renderCloud(); };
+  $('load-clouds').onclick = async () => {
+    try { const [index] = await Promise.all([request('/api/v1/clouds'), loadCatalogueLibrary()]); const select = $('clouds'); select.replaceChildren();
+      if (index.clouds.length === 0) select.add(new Option('No clouds yet', ''));
+      for (const item of index.clouds) select.add(new Option(item.title, item.slug));
+      if (index.clouds[0]) { select.value = index.clouds[0].slug; await loadCloud(select.value); }
+      status('Clouds loaded.');
     } catch (error) { status(error.message, true); }
   };
-  $('courses').onchange = async () => { if (!$('courses').value) return; try { await loadCourse($('courses').value); status(`Loaded ${course.title}.`); } catch (error) { status(error.message, true); } };
-  $('save-course').onclick = async () => {
+  $('clouds').onchange = async () => { if (!$('clouds').value) return; try { await loadCloud($('clouds').value); status(`Loaded ${cloud.title}.`); } catch (error) { status(error.message, true); } };
+  $('save-cloud').onclick = async () => {
     const slug = $('new-slug').value.trim(), title = $('new-title').value.trim();
     if (!token()) return status('Enter the administrator token first.', true);
-    if (!slug || !title) return status('Enter both a course slug and title.', true);
-    try { await request(`/api/v1/courses/${encodeURIComponent(slug)}`, { method: 'POST', headers: headers(), body: JSON.stringify({ title }) });
-      await $('load-courses').onclick(); $('courses').value = slug; await loadCourse(slug); status(`Saved ${title}.`);
+    if (!slug || !title) return status('Enter both a cloud slug and title.', true);
+    try { await request(`/api/v1/clouds/${encodeURIComponent(slug)}`, { method: 'POST', headers: headers(), body: JSON.stringify({ title }) });
+      await $('load-clouds').onclick(); $('clouds').value = slug; await loadCloud(slug); status(`Saved ${title}.`);
     } catch (error) { status(error.message, true); }
   };
   $('upload-catalogue').onclick = async () => {
@@ -127,26 +127,26 @@
     if (!token()) return status('Enter the administrator token first.', true);
     if (!file || !Number.isInteger(version) || version < 1) return status('Choose a catalogue file and positive version.', true);
     try { const reference = await request(`/api/v1/admin/catalogues/${version}`, { method: 'POST', headers: headers(), body: await file.text() });
-      await loadCatalogueLibrary(); renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Select it below to add it to a course.`);
+      await loadCatalogueLibrary(); renderCatalogues(); status(`Uploaded ${reference.id} version ${reference.version}. Select it below to add it to a cloud.`);
     } catch (error) { status(error.message, true); }
   };
   $('save-catalogues').onclick = async () => {
     if (!token()) return status('Enter the administrator token first.', true);
-    if (!course) return status('Select or create a course first.', true);
+    if (!cloud) return status('Select or create a cloud first.', true);
     const catalogues = catalogueLibrary.filter((ref) => $(`ref:${ref.id}:${ref.version}`)?.checked).map(({ id, version, hash }) => ({ id, version, hash }));
-    try { await request(`/api/v1/courses/${encodeURIComponent(course.slug)}/catalogues`, { method: 'PUT', headers: headers(), body: JSON.stringify({ catalogues }) });
-      await loadCourse(course.slug); status(`Saved ${catalogues.length} catalogue revision${catalogues.length === 1 ? '' : 's'} for ${course.title}.`);
+    try { await request(`/api/v1/clouds/${encodeURIComponent(cloud.slug)}/catalogues`, { method: 'PUT', headers: headers(), body: JSON.stringify({ catalogues }) });
+      await loadCloud(cloud.slug); status(`Saved ${catalogues.length} catalogue revision${catalogues.length === 1 ? '' : 's'} for ${cloud.title}.`);
     } catch (error) { status(error.message, true); }
   };
   $('publish').onclick = async () => {
     const workspaceId = $('publication-workspace').value.trim(), title = $('publication-title').value.trim();
     if (!token()) return status('Enter the administrator token first.', true);
-    if (!course) return status('Select or create a course first.', true);
+    if (!cloud) return status('Select or create a cloud first.', true);
     if (!workspaceId || !title) return status('Enter the saved workspace ID and publication title.', true);
     try {
-      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title, mode: $('mode').value, workspaceId, courses: [course.slug] }) });
+      const created = await request('/api/v1/publications', { method: 'POST', headers: headers(), body: JSON.stringify({ title, mode: $('mode').value, workspaceId, clouds: [cloud.slug] }) });
       const link = new URL(`/p/${created.id}`, window.location.origin).href; $('publication-link').replaceChildren(); const anchor = document.createElement('a'); anchor.href = link; anchor.textContent = link; $('publication-link').append('Published: ', anchor);
-      await loadCourse(course.slug); status(`Published ${title}.`);
+      await loadCloud(cloud.slug); status(`Published ${title}.`);
     } catch (error) { status(error.message, true); }
   };
 </script>

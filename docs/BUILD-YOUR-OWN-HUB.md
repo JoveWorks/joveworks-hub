@@ -2,7 +2,7 @@
 
 JoveWorks Hub is a protocol, not a service you have to trust. This document
 is for an administrator — an instructor, a department, an institution — who
-wants to run course material and student workspaces on infrastructure they
+wants to run cloud material and student workspaces on infrastructure they
 control end to end, instead of depending on someone else's hosted Hub for
 security, uptime, or data custody. It explains what you need to implement,
 what you're free to change, and how to check your own implementation against
@@ -24,7 +24,7 @@ concerned.
 
 That means the choice to depend on one specific hosted Hub is exactly
 that — a choice, made for convenience, not a technical requirement. If you'd
-rather not have your course material, your students' workspace tokens, or
+rather not have your cloud material, your students' workspace tokens, or
 your restricted-catalogue access depend on someone else's server, database,
 and operational discipline, you can run your own and point your editor at
 it.
@@ -40,7 +40,7 @@ compatible with [API-v1.md](API-v1.md):
   that shape (not for framework-level rejections like malformed JSON or an
   oversized body — those may be plain text, per the spec).
 - The three auth headers (`X-JoveWorks-Admin-Token`,
-  `X-JoveWorks-Course-Token`, `X-JoveWorks-Workspace-Token`) and exactly
+  `X-JoveWorks-Cloud-Token`, `X-JoveWorks-Workspace-Token`) and exactly
   which routes require which.
 - The request/response JSON field names and types (the spec uses
   `camelCase` throughout).
@@ -83,19 +83,19 @@ useful works end to end.
 1. **Discovery and health.** `GET /.well-known/joveworks` and `GET
    /healthz`. Nothing else depends on these existing, but every client
    checks discovery first.
-2. **Courses.** `POST /api/v1/courses/{slug}`, `GET /api/v1/courses`,
-   `GET /api/v1/courses/{slug}`. Get the admin-token gate working here — it's
+2. **Clouds.** `POST /api/v1/clouds/{slug}`, `GET /api/v1/clouds`,
+   `GET /api/v1/clouds/{slug}`. Get the admin-token gate working here — it's
    reused by everything else.
 3. **Catalogues**, including the [canonical hash](#canonical-json-and-hashing).
    This is the part most worth writing a unit test for before moving on,
    because a hash bug won't surface as an obvious error — it'll surface as
    publications silently failing catalogue-pin validation.
-4. **Course catalogue pins** (`PUT /api/v1/courses/{slug}/catalogues`) and
-   restricted-catalogue access via the course token.
+4. **Cloud catalogue pins** (`PUT /api/v1/clouds/{slug}/catalogues`) and
+   restricted-catalogue access via the cloud token.
 5. **Publications.** These depend on catalogues existing and validating, so
    build them after step 3.
-6. **Student workspaces and shares.** Independent of courses/catalogues
-   except for the optional course-material binding fields; can be built any
+6. **Student workspaces and shares.** Independent of clouds/catalogues
+   except for the optional cloud-material binding fields; can be built any
    time after step 2.
 
 At each phase, run [`scripts/conformance-check.sh`](../scripts/conformance-check.sh)
@@ -106,7 +106,7 @@ leaving you to infer it from the prose spec.
 ## Canonical JSON and hashing
 
 `POST /api/v1/catalogues/{id}/{version}` returns a `hash`, and every
-publication or course pin that references that catalogue must supply the
+publication or cloud pin that references that catalogue must supply the
 exact same value. The hash is SHA-256 over a **canonical** JSON encoding of
 the catalogue's `content`, defined as:
 
@@ -174,20 +174,20 @@ identity system — there are no accounts, sessions, or per-user permissions
 anywhere in the protocol.
 
 - **Admin token** (`X-JoveWorks-Admin-Token`) gates every write except
-  creating a workspace: courses, catalogues, publications, and the admin
+  creating a workspace: clouds, catalogues, publications, and the admin
   catalogue-management routes. It is a single deployment-wide secret. Anyone
-  who has it can publish, republish, or repoint course material for the
+  who has it can publish, republish, or repoint cloud material for the
   whole deployment. Treat it like a root credential: generate it with real
   entropy (`openssl rand -hex 32`, as `.env.example` suggests), keep it out
   of version control and client-side storage, and rotate it if it's ever
   exposed. There is no scoping below "has full write access" — if you need
-  per-course or per-instructor write boundaries, that's a real gap in the
+  per-cloud or per-instructor write boundaries, that's a real gap in the
   current protocol, not a configuration option; you'd need to extend the
   contract (and update any client you control accordingly) to add it.
-- **Course token** (`X-JoveWorks-Course-Token`) gates reading a catalogue
+- **Cloud token** (`X-JoveWorks-Cloud-Token`) gates reading a catalogue
   whose content has `restricted: true`. It is explicitly documented in this
   project as an MVP access gate, not real access control: anyone who has the
-  token — a student who received it through the normal course channel, or
+  token — a student who received it through the normal cloud channel, or
   anyone they forward it to — can read every restricted catalogue on the
   deployment. If a restricted catalogue's confidentiality matters more than
   "keeps it out of casual/accidental public reach," don't rely on this token
@@ -219,7 +219,7 @@ nothing and removes the question entirely.
 Two things the protocol deliberately does **not** give you, so don't assume
 your own implementation has them just because it's compatible: server-side
 formula evaluation (a restricted catalogue's content is fully readable by
-anyone who can pass the course-token check — there's no redaction or
+anyone who can pass the cloud-token check — there's no redaction or
 evaluation-without-disclosure), and any DRM claim on published NodeBooks or
 catalogues — "restricted" is a distribution gate, not an enforcement
 mechanism against a student who has already legitimately received the
@@ -233,10 +233,10 @@ or your own from-scratch implementation — to check it against the documented
 contract:
 
 ```sh
-./scripts/conformance-check.sh https://your-hub.example your-admin-token your-course-token
+./scripts/conformance-check.sh https://your-hub.example your-admin-token your-cloud-token
 ```
 
-It creates its own randomly-suffixed course, catalogue, publication, and
+It creates its own randomly-suffixed cloud, catalogue, publication, and
 workspace, exercises the auth rules, verifies the canonical-hash computation
 against an independently computed reference value, and cleans up after
 itself — it's safe to run against a real deployment with existing data. Run
@@ -258,7 +258,7 @@ operational need in this project, and you'll likely want equivalents:
 | Reference env var | Purpose |
 | --- | --- |
 | `JOVEWORKS_ADMIN_TOKEN` | The admin secret. Required; a Hub should refuse to start without one rather than run with unprotected writes. |
-| `JOVEWORKS_COURSE_TOKEN` | The restricted-catalogue secret. Optional — when unset, restricted catalogues should be refused entirely rather than silently served. |
+| `JOVEWORKS_CLOUD_TOKEN` | The restricted-catalogue secret. Optional — when unset, restricted catalogues should be refused entirely rather than silently served. |
 | `JOVEWORKS_DATABASE_URL` / equivalent | Where persistent state lives. |
 | `JOVEWORKS_BIND` | Listen address, so loopback-only and network-exposed deployments are one setting apart. |
 | `JOVEWORKS_PUBLIC_URL`, `JOVEWORKS_EDITOR_URL` | Needed only for the short-link redirect routes (`/p/{id}`, `/s/{id}`) and workspace-share creation; everything else works without them. |
@@ -266,9 +266,9 @@ operational need in this project, and you'll likely want equivalents:
 ## Once your Hub exists
 
 Nothing about switching Hubs requires this repository's cooperation:
-generate your own admin/course tokens, point the JoveWorks editor's Hub
-address at your deployment's `JOVEWORKS_PUBLIC_URL`, and publish course
+generate your own admin/cloud tokens, point the JoveWorks editor's Hub
+address at your deployment's `JOVEWORKS_PUBLIC_URL`, and publish cloud
 material exactly as described in the main [README](../README.md). Your
-users' trust in their course material and workspace data now rests on your
+users' trust in their cloud material and workspace data now rests on your
 operational security, not a third party's — which, if that's what motivated
 building your own Hub in the first place, is the point.

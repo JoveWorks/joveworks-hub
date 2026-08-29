@@ -44,8 +44,8 @@ Write requests require the exact configured administrator token in:
 X-JoveWorks-Admin-Token: <JOVEWORKS_ADMIN_TOKEN>
 ```
 
-The protected writes are `POST /api/v1/courses/{slug}`,
-`PUT /api/v1/courses/{slug}/catalogues`, `POST /api/v1/catalogues/{id}/{version}`,
+The protected writes are `POST /api/v1/clouds/{slug}`,
+`PUT /api/v1/clouds/{slug}/catalogues`, `POST /api/v1/catalogues/{id}/{version}`,
 `POST /api/v1/admin/catalogues/{version}` (the admin-console YAML/JSON
 catalogue upload), `DELETE /api/v1/admin/catalogues/{id}/{version}`,
 `GET /api/v1/admin/catalogues`, and `POST /api/v1/publications`. A missing,
@@ -57,19 +57,19 @@ Hub](BUILD-YOUR-OWN-HUB.md#security-model) for what that does and does not
 protect against).
 
 Retrieving a catalogue whose stored content has `restricted: true` additionally
-requires the exact configured course token:
+requires the exact configured cloud token:
 
 ```text
-X-JoveWorks-Course-Token: <JOVEWORKS_COURSE_TOKEN>
+X-JoveWorks-Cloud-Token: <JOVEWORKS_CLOUD_TOKEN>
 ```
 
-If no course token is configured, restricted catalogue retrieval is refused.
-The response is `401 Unauthorized`. A course response containing restricted
-catalogues also requires that course token (or the admin token). Public
+If no cloud token is configured, restricted catalogue retrieval is refused.
+The response is `401 Unauthorized`. A cloud response containing restricted
+catalogues also requires that cloud token (or the admin token). Public
 catalogues, publications, discovery, and health do not require either token.
 
 Student workspace endpoints use a third, per-resource header instead of the
-admin or course token:
+admin or cloud token:
 
 ```text
 X-JoveWorks-Workspace-Token: <editToken returned by POST /api/v1/workspaces>
@@ -77,7 +77,7 @@ X-JoveWorks-Workspace-Token: <editToken returned by POST /api/v1/workspaces>
 
 This token is scoped to exactly one workspace (see [Student
 workspaces](#student-workspaces)) and is never accepted in place of the admin
-or course token, or vice versa.
+or cloud token, or vice versa.
 
 ## Common response and error rules
 
@@ -95,11 +95,11 @@ The status meanings are:
 | --- | --- |
 | `200 OK` | Successful retrieval, or a successful catalogue upload response. |
 | `201 Created` | A publication was created. |
-| `204 No Content` | Health response or successful course upsert. |
+| `204 No Content` | Health response or successful cloud upsert. |
 | `400 Bad Request` | Invalid JSON, missing/invalid required fields, or a failed catalogue/publication validation. |
-| `401 Unauthorized` | Required admin or course token is absent or wrong. |
-| `404 Not Found` | The requested course, catalogue revision, or publication does not exist. |
-| `409 Conflict` | A catalogue already exists at the same `(id, version)`, or an immutable revision is still referenced by a course, publication, or workspace and cannot be deleted. |
+| `401 Unauthorized` | Required admin or cloud token is absent or wrong. |
+| `404 Not Found` | The requested cloud, catalogue revision, or publication does not exist. |
+| `409 Conflict` | A catalogue already exists at the same `(id, version)`, or an immutable revision is still referenced by a cloud, publication, or workspace and cannot be deleted. |
 | `413 Payload Too Large` | The request body exceeds 1 MiB (`MAX_REQUEST_BYTES`). Plain-text body, framework-generated — not the `{"error":...}` shape. |
 | `429 Too Many Requests` | The deployment-wide rate limit was exceeded (see [Rate limiting](#rate-limiting-body-size-and-cors)). Body is `{"error":"Hub is busy; try again shortly"}`. |
 | `500 Internal Server Error` | Storage failure. The body is `{"error":"storage failed"}`. |
@@ -111,7 +111,7 @@ expected shape) return `400 Bad Request` with a **plain-text** body
 (`Content-Type: text/plain; charset=utf-8`), not the JSON error shape — a
 conformant client must not assume every error response is JSON. Likewise
 `413` is plain text. Errors from the validation and storage paths listed above
-(course/catalogue/publication/workspace validation, auth, not-found, conflict)
+(cloud/catalogue/publication/workspace validation, auth, not-found, conflict)
 always use the `{"error":"..."}` JSON shape shown here.
 
 ## Rate limiting, body size, and CORS
@@ -135,11 +135,11 @@ protocol requirements, but a client should not assume they are absent:
   catalogues, publications) broadly fetchable, since those are the routes a
   browser-hosted client depends on before it has any credentials.
 
-## Courses
+## Clouds
 
-### `POST /api/v1/courses/{slug}`
+### `POST /api/v1/clouds/{slug}`
 
-Creates or updates the course at `slug`; despite the HTTP method, this is an
+Creates or updates the cloud at `slug`; despite the HTTP method, this is an
 upsert. The request requires the admin header and has this shape:
 
 ```json
@@ -147,28 +147,28 @@ upsert. The request requires the admin header and has this shape:
 ```
 
 `title` is required and must be 1–200 characters. `theme` is optional and may
-be any JSON value. Success is `204 No Content`. Updating a course changes its
+be any JSON value. Success is `204 No Content`. Updating a cloud changes its
 title/theme but does not change or delete its publications.
 
-### `GET /api/v1/courses`
+### `GET /api/v1/clouds`
 
-Returns the courses available from this Hub without requiring a course slug.
+Returns the clouds available from this Hub without requiring a cloud slug.
 It is unauthenticated and ordered case-insensitively by title, then by slug:
 
 ```json
 {
   "protocolVersion":1,
-  "courses":[
+  "clouds":[
     {"slug":"machine-design-2026","title":"Machine design 2026","theme":{"accent":"blue"}}
   ]
 }
 ```
 
-`courses` is an empty array when no courses have been created. The index
-contains only course-selection metadata; retrieve an individual course to get
+`clouds` is an empty array when no clouds have been created. The index
+contains only cloud-selection metadata; retrieve an individual cloud to get
 its publications.
 
-### `GET /api/v1/courses/{slug}`
+### `GET /api/v1/clouds/{slug}`
 
 Returns `200 OK`:
 
@@ -188,33 +188,33 @@ Returns `200 OK`:
 
 `publications` is ordered newest first by the stored publication timestamp.
 `catalogues` is the ID/version-sorted set of immutable revisions explicitly
-pinned to the course. `catalogueContents` includes each full document, so a
-client can load the complete course catalogue set in the same response.
+pinned to the cloud. `catalogueContents` includes each full document, so a
+client can load the complete cloud catalogue set in the same response.
 
-### `GET /api/v1/courses/{slug}/catalogues`
+### `GET /api/v1/clouds/{slug}/catalogues`
 
-Returns the same course-level refs and full catalogue documents without course
+Returns the same cloud-level refs and full catalogue documents without cloud
 metadata or publication summaries:
 
 ```json
 {
   "protocolVersion":1,
-  "courseSlug":"machine-design-2026",
+  "cloudSlug":"machine-design-2026",
   "catalogues":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>"}],
   "catalogueContents":[{"id":"public-example","version":1,"hash":"<64 lowercase hex characters>","content":{"schemaVersion":1,"id":"public-example","restricted":false,"formulas":[]}}]
 }
 ```
 
-It returns `404` for an unknown course and empty arrays for a course with no
-catalogues. Restricted course bundles require the course token.
+It returns `404` for an unknown cloud and empty arrays for a cloud with no
+catalogues. Restricted cloud bundles require the cloud token.
 
-### `PUT /api/v1/courses/{slug}/catalogues`
+### `PUT /api/v1/clouds/{slug}/catalogues`
 
-Requires the admin header. Replaces the course's pinned catalogue set with the
+Requires the admin header. Replaces the cloud's pinned catalogue set with the
 provided immutable references. Every reference must already exist and match its
 stored hash. An empty set is allowed only when no published NodeBook in the
-course still pins a revision; this preserves the ability to open all published
-course material.
+cloud still pins a revision; this preserves the ability to open all published
+cloud material.
 
 ## Catalogues
 
@@ -275,18 +275,18 @@ on a duplicate `(id, version)`. Malformed JSON/YAML is `400`.
 ### `GET /api/v1/catalogues/{id}/{version}`
 
 Returns the stored catalogue `content` itself (not the upload wrapper) with
-`200 OK`. A restricted entry first performs the course-token check. A missing
+`200 OK`. A restricted entry first performs the cloud-token check. A missing
 entry returns `404`.
 
 ### `GET /api/v1/admin/catalogues`
 
 Requires the admin header and returns every stored immutable revision, ordered
-by id and version. It powers the course catalogue checklist in `/admin`.
+by id and version. It powers the cloud catalogue checklist in `/admin`.
 
 ### `DELETE /api/v1/admin/catalogues/{id}/{version}`
 
 Requires the admin header. Deletes an unused immutable revision. Hub rejects
-the request with `409 Conflict` when any course, publication, or workspace
+the request with `409 Conflict` when any cloud, publication, or workspace
 still references it.
 
 ## Publications
@@ -300,14 +300,14 @@ Requires the admin header. The request is:
   "title":"Week 3 — belt drive",
   "mode":"viewer",
   "workspaceId":"Ab12Cd34Ef56",
-  "courses":["machine-design-2026"]
+  "clouds":["machine-design-2026"]
 }
 ```
 
 `mode` is optional and defaults to `viewer`; the only values are `viewer` and
 `editor`. Hub copies the workspace's exact document, catalogue pins, and
 compiled report in one transaction. The stored report must be complete and
-every course slug must already exist. Validation failures return `400`.
+every cloud slug must already exist. Validation failures return `400`.
 
 Success is `201 Created` with a newly generated random 12-character `id` and
 relative resource link:
@@ -360,7 +360,7 @@ No administrator token is required. The request is:
 {"title":"Belt study","document":{"schemaVersion":1,"id":"belt-study"},"compiledNotebook":{"schemaVersion":1,"title":"Belt study","sections":[],"marks":[],"axisReadouts":[]}}
 ```
 
-When a student starts from course material, the editor also sends its course
+When a student starts from cloud material, the editor also sends its cloud
 slug and immutable catalogue pins. Hub verifies both before storing them, then
 returns them on every load so another browser can fetch the exact revisions.
 
@@ -378,7 +378,7 @@ Keep `editToken` private. Hub stores only its SHA-256 digest.
 
 Requires the workspace-token header. It returns the saved `id`, `title`,
 `document`, and `updatedAt` only to the browser that owns that workspace.
-Course material is shared through immutable publications, not workspaces.
+Cloud material is shared through immutable publications, not workspaces.
 
 ### `PUT /api/v1/workspaces/{id}`
 
@@ -421,7 +421,7 @@ workspace's latest `PUT`).
 
 Unauthenticated. Returns `200 OK` with the same
 [`WorkspaceDocument`](#get-apiv1workspacesid) shape as the authenticated
-workspace read (`id`, `title`, `document`, `courseSlug`, `catalogues`,
+workspace read (`id`, `title`, `document`, `cloudSlug`, `catalogues`,
 `updatedAt`) for the workspace behind that share id, or `404` if the share
 does not exist. Note the returned `id` is the underlying **workspace** id, not
 the share id, and it does not include (or require) the edit token — a reader
@@ -441,8 +441,8 @@ and `share` query parameters and call `GET /api/v1/shares/{id}` itself.
 Catalogue revisions and publications are immutable. Clients should therefore
 retain catalogue hashes and publication IDs as content-addressed pins and
 must not assume that a later request at the same URL can replace their
-content. Courses are the exception: their manifest is mutable through the
-course upsert endpoint.
+content. Clouds are the exception: their manifest is mutable through the
+cloud upsert endpoint.
 
 For every successful catalogue GET, Hub sends:
 
@@ -460,5 +460,5 @@ ETag for integrity comparison.
 Publication source and compiled-report responses use immutable one-year cache
 headers and ETags, including `304 Not Modified`. Shared workspace reports use
 ETags with `Cache-Control: no-cache`, so each reuse revalidates current state.
-JSON responses are gzip-compressed when the client accepts gzip. Course
+JSON responses are gzip-compressed when the client accepts gzip. Cloud
 manifests remain mutable and must not receive long-lived cache policy.
