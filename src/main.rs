@@ -966,11 +966,11 @@ async fn create_publication(
     })?;
     let compiled = parse_json(&source.2)?;
     validate_compiled_notebook(&compiled, true)?;
-    if catalogues.is_empty() {
-        return Err(ApiError::BadRequest(
-            "a publication must pin at least one catalogue".into(),
-        ));
-    }
+    // Zero pins is valid: a publication built only from formulas every
+    // client already bundles (the base/array node libraries) needs nothing
+    // fetched to reopen. Pins exist so a viewer can fetch content it does
+    // not already have — restricted or otherwise externally-loaded
+    // catalogues — not as a mandatory non-empty invariant.
     for catalogue in &catalogues {
         let actual = sqlx::query_scalar::<_, String>(
             "SELECT hash FROM catalogues WHERE id = ? AND version = ?",
@@ -2183,6 +2183,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    /// A document built only from formulas every client already bundles (the
+    /// base/array node libraries) needs nothing fetched to reopen, so it must
+    /// be publishable with zero pinned catalogues — regression for a bug
+    /// where `create_publication` rejected exactly this case.
+    #[tokio::test]
+    async fn a_publication_needs_no_pinned_catalogues() {
+        let app = test_app().await;
+        let workspace_response = app
+            .clone()
+            .oneshot(json_request(
+                "/api/v1/workspaces",
+                json!({
+                    "title": "Base-only study",
+                    "document": { "schemaVersion": 1, "id": "base-only" },
+                    "compiledNotebook": compiled_notebook(true)
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(workspace_response.status(), StatusCode::CREATED);
+        let workspace_id = json_body(workspace_response).await["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let response = app
+            .oneshot(json_request(
+                "/api/v1/publications",
+                json!({ "title": "A base-only NodeBook", "workspaceId": workspace_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]
