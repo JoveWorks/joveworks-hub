@@ -332,7 +332,16 @@ Returns `200 OK` with the immutable publication snapshot:
 }
 ```
 
-Publication records are immutable and are not deleted or updated by v1.
+Publication content is immutable and is never updated in place — retracting
+one is a delete, not an edit (see `DELETE /api/v1/publications/{id}` below).
+
+### `DELETE /api/v1/publications/{id}`
+
+Requires the admin header. Retracts the publication: its short link
+(`/p/{id}`), its notebook resource, and its cloud listing all stop resolving
+immediately, and its source workspace is freed to be deleted (see
+`DELETE /api/v1/workspaces/{id}` below). There is no soft-delete or
+archival — an unknown `id` is `404`, success is `204 No Content`.
 
 ### `GET /api/v1/publications/{id}/notebook`
 
@@ -377,7 +386,9 @@ Keep `editToken` private. Hub stores only its SHA-256 digest.
 ### `GET /api/v1/workspaces/{id}`
 
 Requires the workspace-token header. It returns the saved `id`, `title`,
-`document`, and `updatedAt` only to the browser that owns that workspace.
+`document`, `cloudSlug`, `catalogues`, `published`, and `updatedAt` only to
+the browser that owns that workspace. `published` is `true` while any
+publication still has this workspace as its source (see `DELETE` below).
 Cloud material is shared through immutable publications, not workspaces.
 
 ### `PUT /api/v1/workspaces/{id}`
@@ -396,7 +407,9 @@ unknown workspace is `404`; a missing or incorrect edit token is `401`.
 
 Requires the same workspace-token header and returns `204 No Content`. It is
 intended for the owning browser's workspace library; a shared reader cannot
-delete someone else's work.
+delete someone else's work. Returns `409 Conflict` while the workspace is
+still published — retract the publication first with
+`DELETE /api/v1/publications/{id}`.
 
 ### `POST /api/v1/workspaces/{id}/shares`
 

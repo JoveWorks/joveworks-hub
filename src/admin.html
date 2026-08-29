@@ -100,7 +100,19 @@
     $('publications').replaceChildren(); const list = $('publications');
     if (!cloud) { list.innerHTML = '<p class="muted">Select a cloud to see publications.</p>'; renderCatalogues(); return; }
     if (cloud.publications.length === 0) list.innerHTML = '<p class="muted">No NodeBooks have been published to this cloud yet.</p>';
-    for (const publication of cloud.publications) { const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title; const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`; row.append(meta); list.append(row); }
+    for (const publication of cloud.publications) {
+      const row = document.createElement('div'); row.className = 'item'; row.textContent = publication.title;
+      const meta = document.createElement('small'); meta.textContent = `${publication.mode} · ${publication.id}`;
+      const unpublish = document.createElement('button'); unpublish.type = 'button'; unpublish.className = 'danger'; unpublish.textContent = 'Unpublish';
+      unpublish.title = 'Retracts this NodeBook and frees its source workspace to be deleted.';
+      unpublish.onclick = async () => {
+        if (!confirm(`Unpublish "${publication.title}"? Its link stops working and its source workspace can then be deleted. This cannot be undone.`)) return;
+        try { await request(`/api/v1/publications/${encodeURIComponent(publication.id)}`, { method: 'DELETE', headers: headers() });
+          await loadCloud(cloud.slug); status(`Unpublished ${publication.title}.`);
+        } catch (error) { status(error.message, true); }
+      };
+      row.append(meta, unpublish); list.append(row);
+    }
     renderCatalogues();
   };
   const loadCatalogueLibrary = async () => { catalogueLibrary = (await request('/api/v1/admin/catalogues', { headers: headers() })).catalogues; };

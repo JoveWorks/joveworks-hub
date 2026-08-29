@@ -68,6 +68,8 @@ enum ApiError {
     Conflict,
     #[error("this catalogue revision is in use and cannot be deleted")]
     InUse,
+    #[error("this workspace is still published; unpublish it before deleting")]
+    Published,
     #[error("the requested resource was not found")]
     NotFound,
     #[error("this resource requires cloud access")]
@@ -82,6 +84,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict => StatusCode::CONFLICT,
             Self::InUse => StatusCode::CONFLICT,
+            Self::Published => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -272,6 +275,11 @@ struct WorkspaceDocument {
     document: Value,
     cloud_slug: Option<String>,
     catalogues: Vec<CatalogueRef>,
+    /// True while any publication still has this workspace as its source —
+    /// `delete_workspace` refuses to delete while this holds, so a client can
+    /// show the same lock proactively instead of only learning about it from
+    /// a rejected request.
+    published: bool,
     updated_at: String,
 }
 
@@ -338,7 +346,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/api/v1/admin/catalogues", get(list_admin_catalogues))
         .route("/api/v1/publications", post(create_publication))
-        .route("/api/v1/publications/{id}", get(get_publication))
+        .route(
+            "/api/v1/publications/{id}",
+            get(get_publication).delete(delete_publication),
+        )
         .route(
             "/api/v1/publications/{id}/notebook",
             get(get_publication_notebook),
@@ -455,6 +466,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         6,
         "compiled_notebooks",
         include_str!("../migrations/0006_compiled_notebooks.sql"),
+    ),
+    (
+        7,
+        "publication_source_workspace",
+        include_str!("../migrations/0007_publication_source_workspace.sql"),
     ),
 ];
 
@@ -1007,13 +1023,14 @@ async fn create_publication(
         }
     }
     let id = next_publication_id();
-    sqlx::query("INSERT INTO publications (id, title, mode, document_json, catalogues_json, compiled_notebook_json) VALUES (?, ?, ?, ?, ?, ?)")
+    sqlx::query("INSERT INTO publications (id, title, mode, document_json, catalogues_json, compiled_notebook_json, source_workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(&input.title)
         .bind(mode_name(input.mode))
         .bind(&source.0)
         .bind(&source.1)
         .bind(&source.2)
+        .bind(&input.workspace_id)
         .execute(&mut *transaction)
         .await?;
     for cloud in &input.clouds {
@@ -1063,6 +1080,32 @@ async fn get_publication(
         serde_json::to_value(publication).expect("publication serializes"),
         true,
     )
+}
+
+/// Retracts a publication so its source workspace can be deleted. The
+/// publication's short link (`/p/{id}`) and its notebook resource go with
+/// it — there is no soft-delete or archival, matching how catalogue deletion
+/// only ever runs while genuinely unused.
+async fn delete_publication(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&headers, &state)?;
+    let mut transaction = state.database.begin().await?;
+    sqlx::query("DELETE FROM cloud_publications WHERE publication_id = ?")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query("DELETE FROM publications WHERE id = ?")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound);
+    }
+    transaction.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn get_publication_notebook(
@@ -1128,6 +1171,23 @@ async fn create_workspace(
     )))
 }
 
+/// Whether any publication still has `workspace_id` as its source — the
+/// single source of truth `delete_workspace` enforces against and every
+/// workspace response surfaces, so the client can show the same lock
+/// proactively instead of only learning about it from a rejected delete.
+async fn workspace_is_published(
+    database: &SqlitePool,
+    workspace_id: &str,
+) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT EXISTS(SELECT 1 FROM publications WHERE source_workspace_id = ?)",
+    )
+    .bind(workspace_id)
+    .fetch_one(database)
+    .await?
+        != 0)
+}
+
 async fn get_workspace(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1141,6 +1201,7 @@ async fn get_workspace(
     .fetch_optional(&state.database)
     .await?
     .ok_or(ApiError::NotFound)?;
+    let published = workspace_is_published(&state.database, &id).await?;
     Ok(Json(WorkspaceDocument {
         id,
         title: row.0,
@@ -1151,6 +1212,7 @@ async fn get_workspace(
                 "stored workspace catalogue refs are invalid".into(),
             ))
         })?,
+        published,
         updated_at: row.4,
     }))
 }
@@ -1188,6 +1250,7 @@ async fn replace_workspace(
         .bind(&id)
         .fetch_one(&state.database)
         .await?;
+    let published = workspace_is_published(&state.database, &id).await?;
     Ok(Json(WorkspaceDocument {
         id,
         title: input.title,
@@ -1198,6 +1261,7 @@ async fn replace_workspace(
                 "workspace catalogue refs did not serialize".into(),
             ))
         })?,
+        published,
         updated_at,
     }))
 }
@@ -1258,6 +1322,9 @@ async fn delete_workspace(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_workspace_owner(&headers, &state, &id).await?;
+    if workspace_is_published(&state.database, &id).await? {
+        return Err(ApiError::Published);
+    }
     let result = sqlx::query("DELETE FROM workspaces WHERE id = ?")
         .bind(&id)
         .execute(&state.database)
@@ -1330,6 +1397,7 @@ async fn get_shared_workspace(
     let row = sqlx::query_as::<_, (String, String, String, Option<String>, String, String)>(
         "SELECT w.id, w.title, w.document_json, w.cloud_slug, w.catalogues_json, w.updated_at FROM workspaces w JOIN workspace_shares s ON s.workspace_id = w.id WHERE s.id = ?",
     ).bind(&id).fetch_optional(&state.database).await?.ok_or(ApiError::NotFound)?;
+    let published = workspace_is_published(&state.database, &row.0).await?;
     Ok(Json(WorkspaceDocument {
         id: row.0,
         title: row.1,
@@ -1340,6 +1408,7 @@ async fn get_shared_workspace(
                 "stored workspace catalogue refs are invalid".into(),
             ))
         })?,
+        published,
         updated_at: row.5,
     }))
 }
@@ -2367,6 +2436,115 @@ mod tests {
                     .method("DELETE")
                     .uri(format!("/api/v1/workspaces/{id}"))
                     .header(WORKSPACE_TOKEN_HEADER, token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// A published workspace must be locked against deletion until an admin
+    /// retracts the publication — regression for the feature request that a
+    /// student cannot silently pull a NodeBook out from under a class that
+    /// already has the published link.
+    #[tokio::test]
+    async fn a_published_workspace_cannot_be_deleted_until_unpublished() {
+        let app = test_app().await;
+        let workspace_response = app
+            .clone()
+            .oneshot(json_request(
+                "/api/v1/workspaces",
+                json!({
+                    "title": "Locked study",
+                    "document": { "schemaVersion": 1, "id": "locked-study" },
+                    "compiledNotebook": compiled_notebook(true)
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(workspace_response.status(), StatusCode::CREATED);
+        let workspace_created = json_body(workspace_response).await;
+        let workspace_id = workspace_created["id"].as_str().unwrap().to_owned();
+        let workspace_token = workspace_created["editToken"].as_str().unwrap().to_owned();
+
+        let get_workspace = || {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/workspaces/{workspace_id}"))
+                    .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let response = get_workspace().await.unwrap();
+        assert_eq!(json_body(response).await["published"], false);
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "/api/v1/publications",
+                json!({ "title": "Locked NodeBook", "workspaceId": workspace_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let publication_id = json_body(response).await["id"].as_str().unwrap().to_owned();
+
+        let response = get_workspace().await.unwrap();
+        assert_eq!(json_body(response).await["published"], true);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}"))
+                    .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/publications/{publication_id}"))
+                    .header(ADMIN_TOKEN_HEADER, "admin-test-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // The retracted publication's own resource, and its short link, are
+        // gone with it.
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/publications/{publication_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let response = get_workspace().await.unwrap();
+        assert_eq!(json_body(response).await["published"], false);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/workspaces/{workspace_id}"))
+                    .header(WORKSPACE_TOKEN_HEADER, &workspace_token)
                     .body(Body::empty())
                     .unwrap(),
             )
